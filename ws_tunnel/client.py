@@ -3,7 +3,7 @@
 ws_tunnel/client.py — WebSocket 后端客户端（容器端）
 
 同步版本，使用 websocket-client 库以支持 HTTP 代理穿透。
-启动交互式 bash 子进程，通过 WebSocket 接收命令并返回输出。
+启动交互式 shell 子进程，通过 WebSocket 接收命令并返回输出。
 """
 
 import ssl
@@ -18,6 +18,19 @@ import websocket
 logger = logging.getLogger(__name__)
 
 _RECONNECT_MAX_DELAY = 300  # 最大重连间隔 5 分钟
+_HEARTBEAT_INTERVAL = 30    # 心跳间隔秒数
+
+
+def _heartbeat(ws, reconnect_event):
+    """心跳线程：定期发送 __PING__，失败时触发重连"""
+    while not reconnect_event.is_set():
+        try:
+            ws.send("__PING__")
+            time.sleep(_HEARTBEAT_INTERVAL)
+        except Exception:
+            logger.warning("Heartbeat failed, triggering reconnection")
+            reconnect_event.set()
+            break
 
 
 def run_client(
@@ -31,7 +44,7 @@ def run_client(
     """启动 WebSocket 后端客户端
 
     连接中继服务器，注册为后端，并启动交互式 shell 子进程。
-    断开时自动重连（指数退避）。
+    断开时自动重连（指数退避），内置心跳保活。
 
     Args:
         server_url: 中继服务器地址，如 ws://1.2.3.4:8080
@@ -49,6 +62,7 @@ def run_client(
 
     attempt = 0
     while True:
+        reconnect_event = threading.Event()
         try:
             ws = websocket.WebSocket(
                 sslopt={"cert_reqs": ssl.CERT_NONE} if insecure else None,
@@ -70,6 +84,12 @@ def run_client(
 
             # 连接成功，重置重连计数
             attempt = 0
+
+            # 启动心跳线程
+            hb = threading.Thread(
+                target=_heartbeat, args=(ws, reconnect_event), daemon=True
+            )
+            hb.start()
 
             # 启动 shell 进程
             shell_proc = subprocess.Popen(
@@ -105,18 +125,26 @@ def run_client(
 
             # 主线程：接收 WebSocket 命令，写入 shell
             try:
-                while True:
+                while not reconnect_event.is_set():
                     cmd = ws.recv()
                     if not cmd:
                         break
+                    # ── 心跳回包，直接忽略 ──
+                    if cmd == "__PONG__":
+                        continue
+                    # ── 正常命令，转发给 shell ──
                     logger.debug(f"Command: {cmd.strip()[:60]}")
                     shell_proc.stdin.write((cmd + "\n").encode())
                     shell_proc.stdin.flush()
             except websocket.WebSocketConnectionClosedException:
                 logger.warning("WebSocket connection closed")
+            except websocket.WebSocketTimeoutException:
+                # 超时正常（心跳线程在保活），不做处理
+                pass
             except Exception as e:
                 logger.error(f"Receive error: {e}")
             finally:
+                reconnect_event.set()  # 停止心跳
                 shell_proc.kill()
                 ws.close()
 

@@ -41,6 +41,14 @@ def _make_handler(token: str | None):
                 logger.info("Backend registered")
                 try:
                     async for message in backend:
+                        # ── 心跳处理 ──
+                        if message == "__PING__":
+                            try:
+                                await backend.send("__PONG__")
+                            except Exception:
+                                pass
+                            continue
+                        # ── 转发后端输出给所有前端 ──
                         dead = set()
                         for f in frontends:
                             try:
@@ -115,8 +123,14 @@ def _create_ssl_context(cert_path: str, key_path: str) -> ssl.SSLContext:
 
 async def _run_async(host: str, port: int, handler, ssl_context=None):
     """异步运行中继服务"""
-    async with websockets.serve(handler, host, port, ssl=ssl_context):
+    async with websockets.serve(
+        handler, host, port,
+        ssl=ssl_context,
+        ping_interval=20,   # 每 20s 发送 WebSocket Ping
+        ping_timeout=10,    # 10s 内无 Pong 则断开连接
+    ):
         logger.info(f"Relay running on {'wss://' if ssl_context else 'ws://'}{host}:{port}")
+        logger.info("Heartbeat: ping every 20s, timeout 10s")
         await asyncio.Future()  # run forever
 
 
