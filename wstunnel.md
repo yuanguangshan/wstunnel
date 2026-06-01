@@ -1,5 +1,12 @@
 # WebSocket 远程 Shell 链路方案
 
+> **⚠️ 本文档已过时**：本文档是项目早期（v0.1.0 雏形阶段）的设计记录，包含旧版单文件脚本 `ws_relay.py` 和 `ws_backend_sync.py` 的完整代码。
+>
+> 当前版本（**v0.7.1**）已演变为标准 Python 包，新增功能包括：多后端路由、Token + TLS 认证、PTY 模式（支持 vim/top/htop）、心跳保活、指数退避重连、USE/LIST 命令路由等。
+>
+> 如需最新使用文档 → 请参阅 `README.md`
+> 如需深入技术分析 → 请参阅 `深度解析.md`
+
 ## 架构总览
 
 ```
@@ -55,20 +62,23 @@
 ```
 
 **关键设计**：
-- 只允许**一个后端**连接（单容器）
+- 支持**多个后端**同时连接（多容器），通过名称区分和路由
 - 允许多个**前端**连接（多个第三方）
-- 后端断开后自动清理，前端收到错误提示
+- 后端断开后自动清理并通知前端，前端收到错误提示
 
 **代码逻辑**（核心）：
 ```python
-first = await websocket.recv()        # 读第一条消息
-if first == "IAM_BACKEND":            # 容器身份
-    backend = websocket               # 注册为后端
-    # 进入接收循环：容器输出 → 转发给前端
-else:                                 # 第三方身份
-    frontends.add(websocket)          # 加入前端集合
-    # 前端命令 → 转发给后端
-    # 后端输出 → 转发给前端
+first = await websocket.recv()              # 读第一条消息
+backend_info = _parse_backend_auth(first, token)
+if backend_info:                            # 容器身份
+    name, mode = backend_info
+    backends[name] = websocket              # 注册为后端（支持多个）
+    await _broadcast_backend_list(...)      # 通知所有前端
+elif _is_frontend_auth(first, token):       # 前端身份
+    frontends.add(websocket)
+    await _send_backend_list(websocket, backends, ...)
+else:
+    await websocket.close(1008, "Auth failed")
 ```
 
 ### 2. 容器端客户端 — `ws_backend_sync.py`
@@ -169,11 +179,17 @@ ws://43.153.67.212:8080 (VPS)
 
 ## 历史演变
 
-| 阶段 | VPS 服务 | 容器端 | 连接方式 | 状态 |
-|------|---------|--------|---------|------|
-| v1 | `server.py` (HTTP 长轮询) | curl 轮询 | POST /result, GET /cmd | 废弃 |
-| v2 | `ws_server.js` (Node WebSocket) | 无 | ws://8080 → 本地 bash | 废弃 |
-| v3 | `ws_relay.py` (Python 中继) | `ws_backend_sync.py` | 代理 WebSocket + IAM_BACKEND | **当前** |
+| 阶段 | 架构 | 关键特征 | 状态 |
+|------|------|---------|------|
+| v1 | `server.py` + curl 轮询 | HTTP 长轮询，轮询 GET/POST | 废弃 |
+| v2 | `ws_server.js` (Node.js) | Node WebSocket 服务端，无客户端 | 废弃 |
+| v3 | `ws_relay.py` + `ws_backend_sync.py` | Python 单文件脚本，单后端，无认证 | 废弃 |
+| v0.2.0 | `ws-tunnel` CLI + 包结构 | click CLI、PyPI 发布、`--token` 认证 | 历史版本 |
+| v0.3.0 | 同上 | `--cert`/`--key` TLS 支持、`--shell` 参数、`--verbose`/`--quiet` 日志控制 | 历史版本 |
+| v0.5.0 | 多后端路由 | `@name` 命令路由、`LIST` 列举后端、自动命名 | 历史版本 |
+| v0.6.0 | PTY 模式 | 伪终端（默认）、`--no-pty` 回退管道模式、`__SIGNAL` 信号转发 | 历史版本 |
+| v0.7.0 | 控制协议 | URL token 认证（`?token=xxx`）、`__RESIZE` 窗口调整、`USE` 命令 | 历史版本 |
+| **v0.7.1** | **当前稳定版** | PTY 不回显、默认 200x50 终端、完整多后端路由 | **当前** |
 
 ## 启动/维护流程
 
@@ -228,11 +244,9 @@ ws.close()
 
 ## 已知限制
 
-1. **单后端** — 只能有一个容器连接，容器断开后需要重新注册
-2. **消息时序** — 多命令连续发送可能导致输出混合，建议逐条等待
-3. **容器代理** — 容器必须通过 `127.0.0.1:18080` HTTP 代理连接 VPS
-4. **无加密** — WebSocket 连接是明文传输（ws:// 非 wss://）
-5. **无鉴权** — 任何能访问 8080 的人都可以连接
+1. **消息时序（管道模式）** — 管道模式下多命令连续发送可能导致输出混合，建议逐条等待。PTY 模式已解决此问题
+2. **容器代理** — 容器必须通过 `127.0.0.1:18080` HTTP 代理连接 VPS
+3. **仅限 Shell** — 当前绑定交互式 Shell，无法直接转发其他 TCP 服务
 
 ## 已知问题：消息时序
 
@@ -260,7 +274,9 @@ print(ws.recv())
 
 ## 附录：完整代码
 
-### A. VPS 服务端 — `ws_relay.py`
+> **注意**：以下代码是 v1/v2 时代的旧版本，仅保留作为历史参考。当前版本（v0.7.1+）已重写为多文件包结构，支持多后端、认证、TLS、PTY 等。源码见 `ws_tunnel/` 目录。
+
+### A. VPS 服务端 — `ws_relay.py`（旧版，单后端无认证）
 
 ```python
 #!/usr/bin/env python3
@@ -334,7 +350,7 @@ async def main():
 asyncio.run(main())
 ```
 
-### B. 容器客户端 — `ws_backend_sync.py`
+### B. 容器客户端 — `ws_backend_sync.py`（旧版，无 PTY 无心跳）
 
 ```python
 #!/usr/bin/env python3
