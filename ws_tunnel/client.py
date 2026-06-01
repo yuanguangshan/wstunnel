@@ -40,6 +40,7 @@ def run_client(
     token: str | None = None,
     insecure: bool = False,
     shell: str = "/bin/bash",
+    name: str | None = None,
 ):
     """启动 WebSocket 后端客户端
 
@@ -75,12 +76,17 @@ def run_client(
             )
             logger.info(f"Connected to {server_url}")
 
-            # 发送注册消息（带 token 或向后兼容无 token）
-            if token:
-                ws.send(f"IAM_BACKEND:{token}")
+            # 发送注册消息
+            if token and name:
+                reg_msg = f"IAM_BACKEND:{token}:{name}"
+            elif token:
+                reg_msg = f"IAM_BACKEND:{token}"
+            elif name:
+                reg_msg = f"IAM_BACKEND:{name}"
             else:
-                ws.send("IAM_BACKEND")
-            logger.info("Registered as backend")
+                reg_msg = "IAM_BACKEND"
+            ws.send(reg_msg)
+            logger.info(f"Registered as backend (name={name or 'auto'})")
 
             # 连接成功，重置重连计数
             attempt = 0

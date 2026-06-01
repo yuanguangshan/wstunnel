@@ -70,12 +70,16 @@ def relay(host, port, token, cert, key, verbose, quiet):
     "--shell", default="/bin/bash",
     help="远程 shell 路径，默认 /bin/bash",
 )
+@click.option(
+    "--name", default=None,
+    help="容器名称，用于多容器场景。前端通过 @name 路由。不设则自动命名。",
+)
 @click.option("--verbose", is_flag=True, default=False, help="详细日志 (DEBUG)")
 @click.option("--quiet", is_flag=True, default=False, help="静默模式，仅显示警告和错误")
-def client(server, proxy, reconnect, token, insecure, shell, verbose, quiet):
+def client(server, proxy, reconnect, token, insecure, shell, name, verbose, quiet):
     """启动客户端（容器端）"""
     _setup_logging(verbose, quiet)
-    run_client(server, proxy, reconnect, token, insecure, shell)
+    run_client(server, proxy, reconnect, token, insecure, shell, name)
 
 
 def main():
