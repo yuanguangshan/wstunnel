@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ws-tunnel"
-version = "0.1.0"
+version = "0.2.0"
 description = "WebSocket reverse shell relay with HTTP proxy support"
-authors = [{name = "ws-tunnel", email = "you@example.com"}]
+authors = [{name = "yuanguangshan"}]
 license = {text = "MIT"}
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,4 +20,4 @@ dependencies = [
 ws-tunnel = "ws_tunnel.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/yourname/ws-tunnel"
+Homepage = "https://github.com/yuanguangshan/wstunnel"
