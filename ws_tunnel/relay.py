@@ -11,10 +11,12 @@ ws_tunnel/relay.py — WebSocket 中继服务（VPS 端）
   - "AUTH:<token>"                           → 注册为前端
   - 不设 token 时保持向后兼容
 
-PTY 二进制转发:
-  - 后端输出: 如果后端使用 PTY 模式，输出以二进制帧发送，relay 透明转发
-  - 前端输入: 前端可以发送二进制帧（原始按键），relay 透明转发给后端
-  - 窗口调整: 前端发送 __RESIZE:rows,cols 文本消息，relay 转发给后端
+前端命令路由:
+  - USE <name>     → 切换当前后端（之后命令无需 @ 前缀）
+  - USE            → 查看当前使用的后端
+  - LIST           → 列举所有已连接的后端
+  - @name <cmd>    → 临时发给指定后端（不影响当前选择）
+  - <cmd>          → 发送给当前后端（USE 选中的 / 第一个注册的）
 
 数据流:
   前端发送命令/二进制 → relay → 指定后端
@@ -37,6 +39,7 @@ def _make_handler(token: str | None):
     backends: dict[str, object] = {}  # name -> websocket
     backend_modes: dict[str, str] = {}  # name -> "pty" | "pipe"
     frontends: set = set()
+    frontend_targets: dict = {}  # frontend ws -> current backend name (None=auto)
     _count = 0
 
     async def handler(websocket):
@@ -58,7 +61,9 @@ def _make_handler(token: str | None):
                     f"(total {len(backends)})"
                 )
                 # 通知所有前端后端列表变化
-                await _broadcast_backend_list(frontends, backends, backend_modes)
+                await _broadcast_backend_list(
+                    frontends, backends, backend_modes, frontend_targets
+                )
                 try:
                     async for message in websocket:
                         # ── 心跳（仅文本） ──
@@ -68,7 +73,7 @@ def _make_handler(token: str | None):
                             except Exception:
                                 pass
                             continue
-                        # ── 二进制帧：PTU 原始输出，直接转发 ──
+                        # ── 二进制帧：PTY 原始输出，直接转发 ──
                         if isinstance(message, bytes):
                             await _forward_binary_to_frontends(
                                 frontends, message,
@@ -83,24 +88,35 @@ def _make_handler(token: str | None):
                     pass
                 backends.pop(name, None)
                 backend_modes.pop(name, None)
+                # 如果断开的后端正好是某个前端的当前目标，清除它
+                for f, target in list(frontend_targets.items()):
+                    if target == name:
+                        frontend_targets[f] = None
                 logger.info(f"Backend disconnected: '{name}' (total {len(backends)})")
-                await _broadcast_backend_list(frontends, backends, backend_modes)
+                await _broadcast_backend_list(
+                    frontends, backends, backend_modes, frontend_targets
+                )
 
             # ── 前端注册 ──
             elif _is_frontend_auth(first, token):
                 await websocket.send("AUTH_OK")
                 frontends.add(websocket)
+                frontend_targets[websocket] = None  # 默认 auto
                 logger.info(f"Frontend authenticated (total {len(frontends)})")
                 # 发送后端列表
-                await _send_backend_list(websocket, backends, backend_modes)
+                await _send_backend_list(
+                    websocket, backends, backend_modes, None
+                )
                 try:
                     async for message in websocket:
                         await _handle_frontend_message(
-                            websocket, message, backends, frontends
+                            websocket, message, backends, frontends,
+                            backend_modes, frontend_targets
                         )
                 except websockets.exceptions.ConnectionClosed:
                     pass
                 frontends.discard(websocket)
+                frontend_targets.pop(websocket, None)
                 logger.info(f"Frontend disconnected (total {len(frontends)})")
 
             else:
@@ -121,6 +137,7 @@ def _make_handler(token: str | None):
                     backend_modes.pop(n, None)
                     break
             frontends.discard(websocket)
+            frontend_targets.pop(websocket, None)
 
     return handler
 
@@ -182,6 +199,17 @@ def _is_frontend_auth(msg, token):
     return True
 
 
+def _resolve_target(frontend_targets, ws, backends):
+    """解析前端当前的目标后端，返回 (name, ws_backend) 或 None"""
+    target_name = frontend_targets.get(ws)
+    if target_name and target_name in backends:
+        return (target_name, backends[target_name])
+    # auto: 使用第一个注册的后端
+    if backends:
+        return next(iter(backends.items()))
+    return None
+
+
 async def _forward_to_frontends(frontends, message, tag=None):
     """转发文本消息给所有前端，可选加标签"""
     if tag:
@@ -198,11 +226,7 @@ async def _forward_to_frontends(frontends, message, tag=None):
 
 
 async def _forward_binary_to_frontends(frontends, data, tag=None):
-    """转发二进制帧给所有前端
-
-    对于 PTY 输出，二进制帧直接转发（不加标签）。
-    如果需要区分多后端，在二进制数据前加一个文本标签帧。
-    """
+    """转发二进制帧给所有前端"""
     dead = set()
     for f in frontends:
         try:
@@ -212,7 +236,7 @@ async def _forward_binary_to_frontends(frontends, data, tag=None):
     frontends -= dead
 
 
-async def _send_backend_list(ws, backends, backend_modes=None):
+async def _send_backend_list(ws, backends, backend_modes=None, current=None):
     """向前端发送当前后端列表"""
     if not backends:
         await ws.send("[Info] No backends connected")
@@ -220,27 +244,40 @@ async def _send_backend_list(ws, backends, backend_modes=None):
         names = []
         for n in backends:
             mode = (backend_modes or {}).get(n, "pipe")
-            names.append(f"{n}({mode})")
-        await ws.send(f"[Info] Connected backends: {', '.join(names)}")
+            marker = " *" if n == current else ""
+            names.append(f"{n}({mode}){marker}")
+        lines = [
+            f"[Info] Connected backends: {', '.join(names)}",
+        ]
+        if current:
+            lines.append(f"[Info] Current: {current}")
+        await ws.send("\n".join(lines))
 
 
-async def _broadcast_backend_list(frontends, backends, backend_modes=None):
+async def _broadcast_backend_list(
+    frontends, backends, backend_modes, frontend_targets
+):
     """广播后端列表给所有前端"""
     dead = set()
     for f in frontends:
         try:
-            await _send_backend_list(f, backends, backend_modes)
+            current = frontend_targets.get(f)
+            await _send_backend_list(f, backends, backend_modes, current)
         except Exception:
             dead.add(f)
     frontends -= dead
 
 
-async def _handle_frontend_message(ws, message, backends, frontends):
+async def _handle_frontend_message(
+    ws, message, backends, frontends, backend_modes, frontend_targets
+):
     """处理前端发出的命令（支持文本和二进制）"""
-    # ── 二进制帧：原始按键输入，直接转发给默认后端 ──
+
+    # ── 二进制帧：原始按键输入，转发给当前后端 ──
     if isinstance(message, bytes):
-        if backends:
-            name, ws_backend = next(iter(backends.items()))
+        target = _resolve_target(frontend_targets, ws, backends)
+        if target:
+            name, ws_backend = target
             try:
                 await ws_backend.send(message)
             except Exception:
@@ -255,13 +292,44 @@ async def _handle_frontend_message(ws, message, backends, frontends):
 
     # ── LIST: 列举后端 ──
     if msg.upper() == "LIST":
-        await _send_backend_list(ws, backends)
+        current = frontend_targets.get(ws)
+        await _send_backend_list(ws, backends, backend_modes, current)
         return
 
-    # ── __RESIZE:rows,cols / __SIGNAL:SIGXXX: 控制命令，转发给目标后端 ──
+    # ── USE <name>: 切换当前后端 ──
+    if msg.upper() == "USE" or msg.upper().startswith("USE "):
+        parts = msg.split(None, 1)
+        if len(parts) == 1:
+            # USE (无参数): 显示当前目标
+            current = frontend_targets.get(ws)
+            if current:
+                await ws.send(f"[Info] Current backend: {current}")
+            else:
+                # auto 模式，显示默认目标
+                target = _resolve_target(frontend_targets, ws, backends)
+                if target:
+                    await ws.send(f"[Info] Current backend: {target[0]} (auto)")
+                else:
+                    await ws.send("[Info] No backends connected")
+        else:
+            name = parts[1].strip()
+            if name in backends:
+                frontend_targets[ws] = name
+                mode = backend_modes.get(name, "pipe")
+                await ws.send(f"[Info] Switched to backend: {name}({mode})")
+                logger.info(f"Frontend switched to backend '{name}'")
+            else:
+                await ws.send(
+                    f"[Error] Backend '{name}' not found. "
+                    f"Use LIST to see available backends."
+                )
+        return
+
+    # ── __RESIZE:rows,cols / __SIGNAL:SIGXXX: 控制命令，转发给当前后端 ──
     if msg.startswith("__RESIZE:") or msg.startswith("__SIGNAL:"):
-        if backends:
-            name, ws_backend = next(iter(backends.items()))
+        target = _resolve_target(frontend_targets, ws, backends)
+        if target:
+            name, ws_backend = target
             try:
                 await ws_backend.send(msg)
             except Exception:
@@ -269,7 +337,7 @@ async def _handle_frontend_message(ws, message, backends, frontends):
                 backends.pop(name, None)
         return
 
-    # ── @name <cmd>: 发送给指定后端 ──
+    # ── @name <cmd>: 临时发给指定后端（不影响当前选择）──
     if msg.startswith("@"):
         space = msg.find(" ")
         if space == -1:
@@ -284,12 +352,16 @@ async def _handle_frontend_message(ws, message, backends, frontends):
                 await ws.send(f"[Error] Backend '{name}' disconnected")
                 backends.pop(name, None)
         else:
-            await ws.send(f"[Error] Backend '{name}' not found. Use LIST to see available backends.")
+            await ws.send(
+                f"[Error] Backend '{name}' not found. "
+                f"Use LIST to see available backends."
+            )
         return
 
-    # ── 普通命令: 发送给第一个后端（兼容旧版）──
-    if backends:
-        name, ws_backend = next(iter(backends.items()))
+    # ── 普通命令: 发送给当前后端 ──
+    target = _resolve_target(frontend_targets, ws, backends)
+    if target:
+        name, ws_backend = target
         try:
             await ws_backend.send(msg)
         except Exception:
