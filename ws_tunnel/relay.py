@@ -89,14 +89,16 @@ def _make_handler(token: str | None):
 
 
 def _is_backend_auth(msg: str, token: str | None) -> bool:
-    """检查消息是否为合法的后端注册"""
+    """检查消息是否为合法的后端注册（忽略首尾空白）"""
+    msg = msg.strip()
     if token:
         return msg == f"IAM_BACKEND:{token}"
     return msg == "IAM_BACKEND"
 
 
 def _is_frontend_auth(msg: str, token: str | None) -> bool:
-    """检查消息是否为合法的前端认证"""
+    """检查消息是否为合法的前端认证（忽略首尾空白）"""
+    msg = msg.strip()
     if token:
         return msg == f"AUTH:{token}"
     # 无 token 时：第一条消息就是命令，直接当作前端
