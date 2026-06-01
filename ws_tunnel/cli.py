@@ -74,12 +74,16 @@ def relay(host, port, token, cert, key, verbose, quiet):
     "--name", default=None,
     help="容器名称，用于多容器场景。前端通过 @name 路由。不设则自动命名。",
 )
+@click.option(
+    "--no-pty", is_flag=True, default=False,
+    help="禁用 PTY，回退到管道模式（不支持 vim/top 等 TUI 程序，向后兼容）",
+)
 @click.option("--verbose", is_flag=True, default=False, help="详细日志 (DEBUG)")
 @click.option("--quiet", is_flag=True, default=False, help="静默模式，仅显示警告和错误")
-def client(server, proxy, reconnect, token, insecure, shell, name, verbose, quiet):
+def client(server, proxy, reconnect, token, insecure, shell, name, no_pty, verbose, quiet):
     """启动客户端（容器端）"""
     _setup_logging(verbose, quiet)
-    run_client(server, proxy, reconnect, token, insecure, shell, name)
+    run_client(server, proxy, reconnect, token, insecure, shell, name, no_pty)
 
 
 def main():
