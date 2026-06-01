@@ -26,6 +26,7 @@ ws_tunnel/relay.py — WebSocket 中继服务（VPS 端）
 import asyncio
 import logging
 import ssl
+from urllib.parse import urlparse, parse_qs
 
 import websockets
 
@@ -42,8 +43,51 @@ def _make_handler(token: str | None):
     frontend_targets: dict = {}  # frontend ws -> current backend name (None=auto)
     _count = 0
 
-    async def handler(websocket):
+    def _extract_url_token(websocket):
+        """从 WebSocket 连接 URL 中提取 token 参数"""
+        try:
+            # websockets 10.x: websocket.path
+            # websockets 12+: websocket.request.path
+            path = '/'
+            if hasattr(websocket, 'request'):
+                path = websocket.request.path
+            elif hasattr(websocket, 'path'):
+                path = websocket.path
+            parsed = urlparse(path)
+            params = parse_qs(parsed.query)
+            tokens = params.get('token', [])
+            return tokens[0] if tokens else None
+        except Exception:
+            return None
+
+    async def _register_frontend(websocket):
+        """注册前端并进入消息循环"""
+        frontends.add(websocket)
+        frontend_targets[websocket] = None
+        logger.info(f"Frontend authenticated (total {len(frontends)})")
+        await _send_backend_list(websocket, backends, backend_modes, None)
+        try:
+            async for message in websocket:
+                await _handle_frontend_message(
+                    websocket, message, backends, frontends,
+                    backend_modes, frontend_targets
+                )
+        except websockets.exceptions.ConnectionClosed:
+            pass
+        frontends.discard(websocket)
+        frontend_targets.pop(websocket, None)
+        logger.info(f"Frontend disconnected (total {len(frontends)})")
+
+    async def handler(websocket, _path=None):
         nonlocal backends, frontends, _count
+
+        # ── URL token 自动认证 ──
+        url_token = _extract_url_token(websocket)
+        if url_token and token and url_token == token:
+            await websocket.send("AUTH_OK")
+            await _register_frontend(websocket)
+            return
+
         try:
             first = await asyncio.wait_for(websocket.recv(), timeout=30)
 
@@ -97,27 +141,10 @@ def _make_handler(token: str | None):
                     frontends, backends, backend_modes, frontend_targets
                 )
 
-            # ── 前端注册 ──
+            # ── 前端注册（AUTH 消息认证）──
             elif _is_frontend_auth(first, token):
                 await websocket.send("AUTH_OK")
-                frontends.add(websocket)
-                frontend_targets[websocket] = None  # 默认 auto
-                logger.info(f"Frontend authenticated (total {len(frontends)})")
-                # 发送后端列表
-                await _send_backend_list(
-                    websocket, backends, backend_modes, None
-                )
-                try:
-                    async for message in websocket:
-                        await _handle_frontend_message(
-                            websocket, message, backends, frontends,
-                            backend_modes, frontend_targets
-                        )
-                except websockets.exceptions.ConnectionClosed:
-                    pass
-                frontends.discard(websocket)
-                frontend_targets.pop(websocket, None)
-                logger.info(f"Frontend disconnected (total {len(frontends)})")
+                await _register_frontend(websocket)
 
             else:
                 await websocket.send("AUTH_FAIL")
