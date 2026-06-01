@@ -206,18 +206,32 @@ def _run_pty_mode(ws, shell, reconnect_event):
 
     # PTY 输出读取线程
     def read_pty_output():
-        """从 PTY master 读取输出，以二进制帧发送到 WebSocket"""
+        """从 PTY master 读取输出，缓冲后以二进制帧发送到 WebSocket
+
+        缓冲策略：累积读取，直到数据量足够大或 PTY 空闲时才发送。
+        避免逐字节发送（AI 流式输出场景）。
+        """
         try:
             while not reconnect_event.is_set():
                 rlist, _, _ = select.select([master_fd], [], [], 0.5)
                 if rlist:
-                    try:
+                    # 累积读取：先把可用数据全部读出来
+                    buf = bytearray()
+                    while True:
                         data = os.read(master_fd, 65536)
                         if not data:
                             break
-                        ws.send_binary(data)
-                    except OSError:
+                        buf.extend(data)
+                        # 缓冲区足够大，直接发送
+                        if len(buf) >= 8192:
+                            break
+                        # 等一小会儿看还有没有更多数据
+                        r2, _, _ = select.select([master_fd], [], [], 0.05)
+                        if not r2:
+                            break
+                    if not buf:
                         break
+                    ws.send_binary(bytes(buf))
         except Exception:
             pass
         finally:
