@@ -12,6 +12,7 @@ import fcntl
 import os
 import pty
 import select
+import signal
 import ssl
 import struct
 import subprocess
@@ -33,6 +34,34 @@ def _set_winsize(fd, rows, cols):
     """设置伪终端窗口大小"""
     winsize = struct.pack("HHHH", rows, cols, 0, 0)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
+
+
+# 标准信号名称到 signal 模块常量的映射
+_SIGNAL_MAP = {
+    "SIGINT": signal.SIGINT,
+    "SIGTERM": signal.SIGTERM,
+    "SIGKILL": signal.SIGKILL,
+    "SIGQUIT": signal.SIGQUIT,
+    "SIGHUP": signal.SIGHUP,
+    "SIGUSR1": signal.SIGUSR1,
+    "SIGUSR2": signal.SIGUSR2,
+}
+
+
+def _send_signal(shell_proc, sig_name):
+    """向前端进程组发送信号（通过 PTY 的进程组）"""
+    sig = _SIGNAL_MAP.get(sig_name.upper())
+    if sig is None:
+        logger.warning(f"Unknown signal: {sig_name}")
+        return
+    try:
+        # 向整个进程组发送信号（PID 取负值）
+        os.killpg(shell_proc.pid, sig)
+        logger.info(f"Sent {sig_name} to process group {shell_proc.pid}")
+    except ProcessLookupError:
+        logger.debug(f"Process group {shell_proc.pid} already exited")
+    except PermissionError:
+        logger.warning(f"Permission denied sending {sig_name} to pgid {shell_proc.pid}")
 
 
 def _heartbeat(ws, reconnect_event):
@@ -213,6 +242,11 @@ def _run_pty_mode(ws, shell, reconnect_event):
                         _set_winsize(master_fd, r, c)
                     except (ValueError, OSError) as e:
                         logger.debug(f"Resize failed: {e}")
+                    continue
+                # 控制信号: __SIGNAL:SIGINT / __SIGNAL:SIGTERM / __SIGNAL:SIGKILL
+                if msg.startswith("__SIGNAL:"):
+                    sig_name = msg.split(":", 1)[1].strip()
+                    _send_signal(shell_proc, sig_name)
                     continue
                 # 普通命令：加上换行符后写入 PTY
                 os.write(master_fd, (msg + "\n").encode())

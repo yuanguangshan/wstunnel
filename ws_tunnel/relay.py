@@ -258,9 +258,8 @@ async def _handle_frontend_message(ws, message, backends, frontends):
         await _send_backend_list(ws, backends)
         return
 
-    # ── __RESIZE:rows,cols: 窗口大小调整，转发给目标后端 ──
-    if msg.startswith("__RESIZE:"):
-        # 如果有 @name 前缀，路由到指定后端；否则发给默认后端
+    # ── __RESIZE:rows,cols / __SIGNAL:SIGXXX: 控制命令，转发给目标后端 ──
+    if msg.startswith("__RESIZE:") or msg.startswith("__SIGNAL:"):
         if backends:
             name, ws_backend = next(iter(backends.items()))
             try:
