@@ -81,16 +81,21 @@ def run_client(
             )
 
             def read_and_forward():
-                """读取 shell 输出并通过 WebSocket 发送"""
+                """读取 shell 输出，按行缓冲后通过 WebSocket 发送"""
+                buf = bytearray()
                 try:
                     while True:
-                        out = shell_proc.stdout.read(1)
-                        if not out:
+                        byte = shell_proc.stdout.read(1)
+                        if not byte:
                             break
-                        try:
-                            ws.send(out.decode("utf-8", errors="replace"))
-                        except Exception:
-                            break
+                        buf.extend(byte)
+                        # 遇到换行符或缓冲足够大时发送
+                        if byte == b"\n" or len(buf) >= 4096:
+                            ws.send(buf.decode("utf-8", errors="replace"))
+                            buf.clear()
+                    # 发送剩余内容
+                    if buf:
+                        ws.send(buf.decode("utf-8", errors="replace"))
                 except Exception:
                     pass
                 logger.info("Shell output thread exited")
