@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import ssl
 from typing import Any
@@ -34,8 +35,55 @@ from urllib.parse import urlparse, parse_qs
 
 import httpx
 import websockets
+from websockets.http import Headers
+from websockets.server import Response
 
 logger = logging.getLogger(__name__)
+
+# ──────────────────────────────────────────────
+#  静态页面（web/index.html）
+# ──────────────────────────────────────────────
+
+_INDEX_HTML: bytes | None = None
+
+
+def _load_index_html() -> bytes | None:
+    """从已知路径加载嵌入式 Web 终端页面。"""
+    candidates = [
+        os.path.join(os.getcwd(), "web", "index.html"),
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "web", "index.html"),
+    ]
+    for path in candidates:
+        try:
+            with open(path, "rb") as f:
+                data = f.read()
+            logger.info(f"Loaded web terminal page: {path}")
+            return data
+        except FileNotFoundError:
+            continue
+    logger.warning("web/index.html not found — HTTP static serving disabled")
+    return None
+
+
+_INDEX_HTML = _load_index_html()
+
+
+async def _http_request_handler(connection: Any, request: Any) -> Response | None:
+    """处理普通 HTTP 请求，返回 Web 终端页面。
+
+    在 ``process_request`` 回调中使用。返回 ``None`` 则继续 WebSocket 升级。
+    """
+    if _INDEX_HTML is None:
+        return None
+    # 只拦截非 WebSocket 的 HTTP GET 请求
+    if request.headers.get("Upgrade", "").lower() == "websocket":
+        return None
+    if request.path in ("/", "/index.html"):
+        headers = Headers()
+        headers["Content-Type"] = "text/html; charset=utf-8"
+        return Response(200, "OK", headers, _INDEX_HTML)
+    return None
+
 
 # 匹配 ANSI 转义序列：ESC [ ... 最终字节，以及 ESC ] ... BEL/ST
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][AB012]|\x1b\[[?][0-9;]*[a-zA-Z]")
@@ -649,8 +697,13 @@ async def _run_async(
         ssl=ssl_context,
         ping_interval=20,
         ping_timeout=10,
+        process_request=_http_request_handler,
     ):
-        logger.info(f"Relay running on {'wss://' if ssl_context else 'ws://'}{host}:{port}")
+        scheme = "wss" if ssl_context else "ws"
+        http_scheme = "https" if ssl_context else "http"
+        logger.info(f"Relay running on {scheme}://{host}:{port}")
+        if _INDEX_HTML:
+            logger.info(f"Web terminal: {http_scheme}://{host}:{port}")
         logger.info("Heartbeat: ping every 20s, timeout 10s")
         await asyncio.Future()
 
