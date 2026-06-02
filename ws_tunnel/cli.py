@@ -45,12 +45,16 @@ def cli():
 )
 @click.option("--cert", default=None, help="TLS 证书路径（启用 wss://）")
 @click.option("--key", default=None, help="TLS 私钥路径。未指定时使用 --cert 路径的同一文件")
+@click.option(
+    "--wxpush", default=None,
+    help="微信推送通知（后端上线/下线），格式 url:key",
+)
 @click.option("--verbose", is_flag=True, default=False, help="详细日志 (DEBUG)")
 @click.option("--quiet", is_flag=True, default=False, help="静默模式，仅显示警告和错误")
-def relay(host, port, token, cert, key, verbose, quiet):
+def relay(host, port, token, cert, key, wxpush, verbose, quiet):
     """启动中继服务（VPS 端）"""
     _setup_logging(verbose, quiet)
-    run_relay(host, port, token, cert, key)
+    run_relay(host, port, token, cert, key, wxpush)
 
 
 @cli.command()

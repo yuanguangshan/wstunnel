@@ -28,14 +28,42 @@ import logging
 import ssl
 from urllib.parse import urlparse, parse_qs
 
+import httpx
 import websockets
 
 logger = logging.getLogger(__name__)
 
+
+class _WxPushNotifier:
+    """微信推送通知器：后端上线/下线时发送消息"""
+
+    def __init__(self, url: str, key: str):
+        self.url = url
+        self.key = key
+
+    async def send(self, text: str):
+        """异步发送推送，失败仅 warning，不影响主流程"""
+        try:
+            async with httpx.AsyncClient() as client:
+                resp = await client.post(
+                    self.url,
+                    json={"msgtype": "text", "content": text, "to_user": "@all"},
+                    headers={"Authorization": f"Bearer {self.key}"},
+                    timeout=10,
+                )
+                data = resp.json()
+                if data.get("status") != "success":
+                    logger.warning(f"WxPush response: {data}")
+                else:
+                    logger.info(f"WxPush sent: {text[:50]}")
+        except Exception as e:
+            logger.warning(f"WxPush failed: {e}")
+
+
 _backend_counter = 0
 
 
-def _make_handler(token: str | None):
+def _make_handler(token: str | None, notifier: _WxPushNotifier | None = None):
     """创建 handler 闭包"""
     backends: dict[str, object] = {}  # name -> websocket
     backend_modes: dict[str, str] = {}  # name -> "pty" | "pipe"
@@ -104,6 +132,11 @@ def _make_handler(token: str | None):
                     f"Backend registered: '{name}' mode={mode} "
                     f"(total {len(backends)})"
                 )
+                # 微信推送：后端上线
+                if notifier:
+                    await notifier.send(
+                        f"✅ ws-tunnel: 后端 '{name}' 已上线 ({mode})"
+                    )
                 # 通知所有前端后端列表变化
                 await _broadcast_backend_list(
                     frontends, backends, backend_modes, frontend_targets
@@ -137,6 +170,11 @@ def _make_handler(token: str | None):
                     if target == name:
                         frontend_targets[f] = None
                 logger.info(f"Backend disconnected: '{name}' (total {len(backends)})")
+                # 微信推送：后端下线
+                if notifier:
+                    await notifier.send(
+                        f"❌ ws-tunnel: 后端 '{name}' 已下线"
+                    )
                 await _broadcast_backend_list(
                     frontends, backends, backend_modes, frontend_targets
                 )
@@ -420,22 +458,33 @@ async def _run_async(host: str, port: int, handler, ssl_context=None):
 
 
 def run_relay(host: str = "0.0.0.0", port: int = 8080, token: str | None = None,
-              cert_path: str | None = None, key_path: str | None = None):
+              cert_path: str | None = None, key_path: str | None = None,
+              wxpush: str | None = None):
     """启动 WebSocket 中继服务
 
     Args:
         host: 监听地址，默认 0.0.0.0
         port: 监听端口，默认 8080
         token: 可选认证令牌。None = 不开启认证（向后兼容）
+        wxpush: 微信推送通知，格式 url:key
     """
     if token:
         logger.info(f"Authentication enabled (token={token[:8]}...)")
     else:
         logger.warning("No token set — anyone can connect!")
 
+    notifier = None
+    if wxpush:
+        try:
+            url, key = wxpush.rsplit(":", 1)
+            notifier = _WxPushNotifier(url.strip(), key.strip())
+            logger.info(f"WxPush enabled (url={url.strip()[:40]}...)")
+        except ValueError:
+            logger.error(f"Invalid --wxpush format, expected url:key, got: {wxpush}")
+
     ssl_context = None
     if cert_path:
         ssl_context = _create_ssl_context(cert_path, key_path or cert_path)
 
-    handler = _make_handler(token)
+    handler = _make_handler(token, notifier)
     asyncio.run(_run_async(host, port, handler, ssl_context))
