@@ -205,8 +205,9 @@ function handleRelayText(text) {
       backends = listStr.split(',').map(s => s.trim()).filter(s => s);
       sel.innerHTML = backends.map(b => {
         const current = b.endsWith(' *');
-        const name = current ? b.slice(0, -2).trim() : b;
-        return `<option value="${name}" ${current ? 'selected' : ''}>${b}</option>`;
+        const display = current ? b.slice(0, -2).trim() : b;
+        const name = display.replace(/\s*\([^)]*\)$/, '');  // 去掉 (pty)/(pipe) 后缀
+        return `<option value="${name}" ${current ? 'selected' : ''}>${display}</option>`;
       }).join('');
       sel.disabled = false;
     }
