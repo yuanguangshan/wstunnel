@@ -214,6 +214,13 @@ def run_client(
             )
             time.sleep(delay)
         else:
+            # _run_*mode 正常返回 ≠ 连接健康
+            # PTY 线程退出 / 心跳失败 / WebSocket 关闭 都会触发
+            # reconnect_event.set() 后让 run_*mode 优雅退出（无异常）
+            # 这里检测到 event 已 set 就走重连，而不是 break 退出进程
+            if reconnect_event.is_set():
+                logger.info("Connection degraded, reconnecting...")
+                continue
             break
 
 
