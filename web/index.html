@@ -295,12 +295,29 @@ function initTerminal() {
   window.addEventListener('resize', sendResize);
   setTimeout(sendResize, 500);
 
+  // 粘贴事件：右键 / Ctrl+Shift+V
+  term.element.addEventListener('paste', (e) => {
+    e.preventDefault();
+    const text = (e.clipboardData || window.clipboardData).getData('text/plain');
+    if (text && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(new TextEncoder().encode(text));
+    }
+  });
+
   // 按键输入 → WebSocket 二进制帧
-  // xterm.js 内部已正确处理 IME 中文输入法：组合期间不触发 onData，
-  // 只有选字完成后才发射最终字符
   term.onData((data) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(new TextEncoder().encode(data));
+    }
+  });
+
+  // IME 中文输入：直接在 textarea 上监听 compositionend，
+  // 从中读取最终字符发送，绕过 xterm 可能的 onData 遗漏
+  term.textarea.addEventListener('compositionend', () => {
+    const text = term.textarea.value;
+    if (text && ws && ws.readyState === WebSocket.OPEN) {
+      term.textarea.value = '';
+      ws.send(new TextEncoder().encode(text));
     }
   });
 }
