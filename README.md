@@ -283,6 +283,27 @@ ws.close()
 "
 ```
 
+### 工作流 D：Web 终端（xterm.js）
+
+wsstunnel 自带一个基于 xterm.js 的 Web 终端，浏览器打开即用：
+
+```bash
+# 直接打开
+open web/index.html
+
+# 或传参自动连接（推荐书签）
+open "web/index.html?server=wss://your-vps:443&token=mysecret"
+```
+
+页面功能：
+- **原生终端体验**：颜色、光标、`vim`、`top`、`htop` 全部原生支持
+- **`\r` 正确处理**：xterm.js 是完整终端模拟器，不是文本显示
+- **窗口大小自适应**：`__RESIZE` 自动同步
+- **URL token 认证**：`?token=xxx` 自动连接，无需手动输入
+- **连接管理**：断开后可重连，显示连接状态
+
+你也可以通过 `web/index.html?server=ws://your-vps:8080` 直接连接 ws:// 中继。
+
 ### 工作流 D：系统服务（systemd 自动启动）
 
 VPS 端的 `/etc/systemd/system/wsstunnel.service`：
