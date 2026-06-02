@@ -13,11 +13,16 @@ from .relay import run_relay
 from .client import run_client
 
 # 从环境变量读取默认 token
-_DEFAULT_TOKEN = os.environ.get("WS_TUNNEL_TOKEN", None)
+_DEFAULT_TOKEN: str | None = os.environ.get("WS_TUNNEL_TOKEN", None)
 
 
-def _setup_logging(verbose: bool, quiet: bool):
-    """配置日志级别"""
+def _setup_logging(verbose: bool, quiet: bool) -> None:
+    """配置日志级别。
+
+    Args:
+        verbose: 启用 DEBUG 级别。
+        quiet: 仅显示 WARNING 及以上。
+    """
     if verbose:
         level = logging.DEBUG
     elif quiet:
@@ -31,7 +36,8 @@ def _setup_logging(verbose: bool, quiet: bool):
 
 
 @click.group()
-def cli():
+@click.version_option(package_name="wsstunnel")
+def cli() -> None:
     """WebSocket Tunnel - 远程 Shell 中继工具"""
 
 
@@ -51,7 +57,16 @@ def cli():
 )
 @click.option("--verbose", is_flag=True, default=False, help="详细日志 (DEBUG)")
 @click.option("--quiet", is_flag=True, default=False, help="静默模式，仅显示警告和错误")
-def relay(host, port, token, cert, key, wxpush, verbose, quiet):
+def relay(
+    host: str,
+    port: int,
+    token: str | None,
+    cert: str | None,
+    key: str | None,
+    wxpush: str | None,
+    verbose: bool,
+    quiet: bool,
+) -> None:
     """启动中继服务（VPS 端）"""
     _setup_logging(verbose, quiet)
     run_relay(host, port, token, cert, key, wxpush)
@@ -84,13 +99,25 @@ def relay(host, port, token, cert, key, wxpush, verbose, quiet):
 )
 @click.option("--verbose", is_flag=True, default=False, help="详细日志 (DEBUG)")
 @click.option("--quiet", is_flag=True, default=False, help="静默模式，仅显示警告和错误")
-def client(server, proxy, reconnect, token, insecure, shell, name, no_pty, verbose, quiet):
+def client(
+    server: str,
+    proxy: str | None,
+    reconnect: int,
+    token: str | None,
+    insecure: bool,
+    shell: str,
+    name: str | None,
+    no_pty: bool,
+    verbose: bool,
+    quiet: bool,
+) -> None:
     """启动客户端（容器端）"""
     _setup_logging(verbose, quiet)
     run_client(server, proxy, reconnect, token, insecure, shell, name, no_pty)
 
 
-def main():
+def main() -> None:
+    """CLI 入口函数。"""
     cli()
 
 

@@ -8,6 +8,8 @@ ws_tunnel/client.py — WebSocket 后端客户端（容器端）
   - 管道模式（--no-pty）: 使用普通管道，仅支持行缓冲输出（向后兼容）
 """
 
+from __future__ import annotations
+
 import fcntl
 import os
 import pty
@@ -20,6 +22,7 @@ import termios
 import threading
 import time
 import logging
+from typing import Any
 from urllib.parse import urlparse
 
 import websocket
@@ -28,16 +31,27 @@ logger = logging.getLogger(__name__)
 
 _RECONNECT_MAX_DELAY = 300  # 最大重连间隔 5 分钟
 _HEARTBEAT_INTERVAL = 30    # 心跳间隔秒数
+_PIPE_READ_BUF = 4096       # 管道模式读取缓冲区大小
 
 
-def _set_winsize(fd, rows, cols):
-    """设置伪终端窗口大小"""
+# ──────────────────────────────────────────────
+#  终端与信号工具
+# ──────────────────────────────────────────────
+
+def _set_winsize(fd: int, rows: int, cols: int) -> None:
+    """设置伪终端窗口大小。
+
+    Args:
+        fd: PTY master 文件描述符。
+        rows: 行数。
+        cols: 列数。
+    """
     winsize = struct.pack("HHHH", rows, cols, 0, 0)
     fcntl.ioctl(fd, termios.TIOCSWINSZ, winsize)
 
 
 # 标准信号名称到 signal 模块常量的映射
-_SIGNAL_MAP = {
+_SIGNAL_MAP: dict[str, signal.Signals] = {
     "SIGINT": signal.SIGINT,
     "SIGTERM": signal.SIGTERM,
     "SIGKILL": signal.SIGKILL,
@@ -48,8 +62,13 @@ _SIGNAL_MAP = {
 }
 
 
-def _send_signal(shell_proc, sig_name):
-    """向前端进程组发送信号（通过 PTY 的进程组）"""
+def _send_signal(shell_proc: subprocess.Popen, sig_name: str) -> None:
+    """向进程组发送信号。
+
+    Args:
+        shell_proc: shell 子进程。
+        sig_name: 信号名称，如 ``"SIGINT"``。
+    """
     sig = _SIGNAL_MAP.get(sig_name.upper())
     if sig is None:
         logger.warning(f"Unknown signal: {sig_name}")
@@ -64,8 +83,32 @@ def _send_signal(shell_proc, sig_name):
         logger.warning(f"Permission denied sending {sig_name} to pgid {shell_proc.pid}")
 
 
-def _heartbeat(ws, reconnect_event):
-    """心跳线程：定期发送 __PING__，失败时触发重连"""
+def _terminate_process(proc: subprocess.Popen, timeout: float = 5.0) -> None:
+    """优雅终止子进程：先 SIGTERM，超时后 SIGKILL。
+
+    Args:
+        proc: 要终止的子进程。
+        timeout: SIGTERM 后等待退出的秒数。
+    """
+    try:
+        proc.terminate()
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+
+
+# ──────────────────────────────────────────────
+#  心跳
+# ──────────────────────────────────────────────
+
+def _heartbeat(ws: websocket.WebSocket, reconnect_event: threading.Event) -> None:
+    """心跳线程：定期发送 ``__PING__``，失败时触发重连。
+
+    Args:
+        ws: WebSocket 连接实例。
+        reconnect_event: 重连事件，``set()`` 时通知主线程重连。
+    """
     while not reconnect_event.is_set():
         try:
             ws.send("__PING__")
@@ -76,6 +119,10 @@ def _heartbeat(ws, reconnect_event):
             break
 
 
+# ──────────────────────────────────────────────
+#  公共 API
+# ──────────────────────────────────────────────
+
 def run_client(
     server_url: str,
     proxy: str | None = None,
@@ -85,23 +132,24 @@ def run_client(
     shell: str = "/bin/bash",
     name: str | None = None,
     no_pty: bool = False,
-):
-    """启动 WebSocket 后端客户端
+) -> None:
+    """启动 WebSocket 后端客户端。
 
     连接中继服务器，注册为后端，并启动交互式 shell 子进程。
     断开时自动重连（指数退避），内置心跳保活。
 
     Args:
-        server_url: 中继服务器地址，如 ws://1.2.3.4:8080
-        proxy: HTTP 代理地址，如 http://127.0.0.1:18080。None 表示直连。
-        reconnect_interval: 初始重连间隔秒数，默认 5
-        token: 认证令牌。与中继端 --token 保持一致。
+        server_url: 中继服务器地址，如 ``ws://1.2.3.4:8080``。
+        proxy: HTTP 代理地址，如 ``http://127.0.0.1:18080``。``None`` 表示直连。
+        reconnect_interval: 初始重连间隔秒数，默认 5。
+        token: 认证令牌。与中继端 ``--token`` 保持一致。
         insecure: 跳过 TLS 证书验证（自签名证书）。
-        shell: shell 路径，默认 /bin/bash
-        name: 容器名称，用于多容器场景
-        no_pty: 禁用 PTY，回退到管道模式（向后兼容）
+        shell: shell 路径，默认 ``/bin/bash``。
+        name: 容器名称，用于多容器场景。
+        no_pty: 禁用 PTY，回退到管道模式（向后兼容）。
     """
-    proxy_host = proxy_port = None
+    proxy_host: str | None = None
+    proxy_port: int | None = None
     if proxy:
         p = urlparse(proxy)
         proxy_host = p.hostname
@@ -173,8 +221,18 @@ def run_client(
 #  PTY 模式：支持 vim / top / htop 等 TUI 程序
 # ──────────────────────────────────────────────
 
-def _run_pty_mode(ws, shell, reconnect_event):
-    """PTY 模式：使用伪终端，支持全屏 TUI 程序和窗口大小调整"""
+def _run_pty_mode(
+    ws: websocket.WebSocket,
+    shell: str,
+    reconnect_event: threading.Event,
+) -> None:
+    """PTY 模式：使用伪终端，支持全屏 TUI 程序和窗口大小调整。
+
+    Args:
+        ws: WebSocket 连接。
+        shell: shell 可执行文件路径。
+        reconnect_event: 重连事件。
+    """
     master_fd, slave_fd = pty.openpty()
 
     # 获取当前终端大小（如果可以从父进程继承）
@@ -205,8 +263,8 @@ def _run_pty_mode(ws, shell, reconnect_event):
         pass
 
     # PTY 输出读取线程
-    def read_pty_output():
-        """从 PTY master 读取输出，以二进制帧发送到 WebSocket"""
+    def read_pty_output() -> None:
+        """从 PTY master 读取输出，以二进制帧发送到 WebSocket。"""
         try:
             while not reconnect_event.is_set():
                 rlist, _, _ = select.select([master_fd], [], [], 0.5)
@@ -266,7 +324,7 @@ def _run_pty_mode(ws, shell, reconnect_event):
         logger.error(f"Receive error: {e}")
     finally:
         reconnect_event.set()
-        shell_proc.kill()
+        _terminate_process(shell_proc)
         ws.close()
         try:
             os.close(master_fd)
@@ -278,8 +336,20 @@ def _run_pty_mode(ws, shell, reconnect_event):
 #  管道模式：向后兼容，仅支持行缓冲输出
 # ──────────────────────────────────────────────
 
-def _run_pipe_mode(ws, shell, reconnect_event):
-    """管道模式（向后兼容）：使用普通管道，按行缓冲输出"""
+def _run_pipe_mode(
+    ws: websocket.WebSocket,
+    shell: str,
+    reconnect_event: threading.Event,
+) -> None:
+    """管道模式（向后兼容）：使用普通管道，按行缓冲输出。
+
+    使用 4096 字节缓冲读取 shell 输出，遇到换行符或缓冲区满时发送。
+
+    Args:
+        ws: WebSocket 连接。
+        shell: shell 可执行文件路径。
+        reconnect_event: 重连事件。
+    """
     shell_proc = subprocess.Popen(
         [shell, "-i"],
         stdin=subprocess.PIPE,
@@ -288,17 +358,22 @@ def _run_pipe_mode(ws, shell, reconnect_event):
         bufsize=0,
     )
 
-    def read_and_forward():
-        """读取 shell 输出，按行缓冲后通过 WebSocket 发送"""
+    def read_and_forward() -> None:
+        """读取 shell 输出，按行缓冲后通过 WebSocket 发送。"""
         buf = bytearray()
         try:
             while True:
-                byte = shell_proc.stdout.read(1)
-                if not byte:
+                data = shell_proc.stdout.read(_PIPE_READ_BUF)
+                if not data:
                     break
-                buf.extend(byte)
-                # 遇到换行符或缓冲足够大时发送
-                if byte == b"\n" or len(buf) >= 4096:
+                buf.extend(data)
+                # 找到最后一个换行符，发送完整行
+                last_nl = buf.rfind(b"\n")
+                if last_nl >= 0:
+                    ws.send(buf[:last_nl + 1].decode("utf-8", errors="replace"))
+                    buf = buf[last_nl + 1:]
+                elif len(buf) >= 4096:
+                    # 缓冲区满且无换行，直接发送
                     ws.send(buf.decode("utf-8", errors="replace"))
                     buf.clear()
             # 发送剩余内容
@@ -332,5 +407,5 @@ def _run_pipe_mode(ws, shell, reconnect_event):
         logger.error(f"Receive error: {e}")
     finally:
         reconnect_event.set()  # 停止心跳
-        shell_proc.kill()
+        _terminate_process(shell_proc)
         ws.close()

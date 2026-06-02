@@ -23,9 +23,12 @@ ws_tunnel/relay.py — WebSocket 中继服务（VPS 端）
   后端输出文本/二进制 → relay → 所有前端（文本输出含 [@name] 标签）
 """
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import ssl
+from typing import Any
 from urllib.parse import urlparse, parse_qs
 
 import httpx
@@ -34,15 +37,19 @@ import websockets
 logger = logging.getLogger(__name__)
 
 
-class _WxPushNotifier:
-    """微信推送通知器：后端上线/下线时发送消息"""
+# ──────────────────────────────────────────────
+#  微信推送通知器
+# ──────────────────────────────────────────────
 
-    def __init__(self, url: str, key: str):
+class _WxPushNotifier:
+    """微信推送通知器：后端上线/下线时发送消息。"""
+
+    def __init__(self, url: str, key: str) -> None:
         self.url = url
         self.key = key
 
-    async def send(self, text: str):
-        """异步发送推送，失败仅 warning，不影响主流程"""
+    async def send(self, text: str) -> None:
+        """异步发送推送，失败仅 warning，不影响主流程。"""
         try:
             async with httpx.AsyncClient() as client:
                 resp = await client.post(
@@ -60,87 +67,457 @@ class _WxPushNotifier:
             logger.warning(f"WxPush failed: {e}")
 
 
-_backend_counter = 0
+# ──────────────────────────────────────────────
+#  协议解析（纯函数，便于单元测试）
+# ──────────────────────────────────────────────
+
+def _parse_backend_auth(msg: str | bytes, token: str | None) -> tuple[str, str] | None:
+    """解析后端认证消息，返回 (name, mode) 元组，认证失败返回 ``None``。
+
+    支持格式:
+      IAM_BACKEND:<token>:<name>:<pty_flag>  → (name, "pty"|"pipe")
+      IAM_BACKEND:<token>:<name>             → (name, "pipe")  # 兼容旧客户端
+      IAM_BACKEND:<token>                    → (auto, "pipe")
+      IAM_BACKEND:<name>:<pty_flag>          → (name, "pty"|"pipe")  # 无 token
+      IAM_BACKEND:<pty_flag>                 → (auto, "pty"|"pipe")  # 无 token
+      IAM_BACKEND                            → (auto, "pipe")        # 最旧兼容
+
+    Args:
+        msg: 第一条 WebSocket 消息（文本或二进制）。
+        token: 期望的认证令牌，``None`` 表示不校验。
+
+    Returns:
+        ``(name, mode)`` 二元组，或 ``None`` 表示不是合法的后端注册消息。
+    """
+    if isinstance(msg, bytes):
+        return None
+
+    msg = msg.strip()
+
+    prefix = f"IAM_BACKEND:{token}" if token else "IAM_BACKEND"
+    if not msg.startswith(prefix):
+        return None
+
+    rest = msg[len(prefix):]
+    parts = [p.strip() for p in rest.split(":") if p.strip()] if rest else []
+
+    mode = "pipe"
+    if parts and parts[-1] in ("pty", "pipe"):
+        mode = parts.pop()
+
+    name = parts[0] if parts else None
+    return (name, mode)  # name 可能为 None，由调用方自动命名
 
 
-def _make_handler(token: str | None, notifier: _WxPushNotifier | None = None):
-    """创建 handler 闭包"""
-    backends: dict[str, object] = {}  # name -> websocket
-    backend_modes: dict[str, str] = {}  # name -> "pty" | "pipe"
-    frontends: set = set()
-    frontend_targets: dict = {}  # frontend ws -> current backend name (None=auto)
-    _count = 0
+def _is_frontend_auth(msg: str | bytes, token: str | None) -> bool:
+    """检查消息是否为合法的前端认证。
 
-    def _extract_url_token(websocket):
-        """从 WebSocket 连接 URL 中提取 token 参数"""
+    Args:
+        msg: 第一条 WebSocket 消息。
+        token: 期望的认证令牌。
+
+    Returns:
+        ``True`` 表示认证通过。
+    """
+    if isinstance(msg, bytes):
+        return False
+    msg = msg.strip()
+    if token:
+        return msg == f"AUTH:{token}"
+    return True
+
+
+# ──────────────────────────────────────────────
+#  前端广播辅助函数
+# ──────────────────────────────────────────────
+
+async def _forward_to_frontends(
+    frontends: set[Any],
+    message: str,
+    tag: str | None = None,
+) -> None:
+    """转发文本消息给所有前端，可选加 ``[@tag]`` 标签。
+
+    自动清理已断开的前端连接。
+
+    Args:
+        frontends: 前端 WebSocket 连接集合（会被原地修改）。
+        message: 要转发的文本消息。
+        tag: 可选标签，多后端时区分来源。
+    """
+    payload = f"[@{tag}] {message}" if tag else message
+    dead: set[Any] = set()
+    for f in frontends:
         try:
-            # websockets 10.x: websocket.path
-            # websockets 12+: websocket.request.path
-            path = '/'
-            if hasattr(websocket, 'request'):
+            await f.send(payload)
+        except Exception:
+            dead.add(f)
+    frontends -= dead
+
+
+async def _forward_binary_to_frontends(
+    frontends: set[Any],
+    data: bytes,
+    tag: str | None = None,
+) -> None:
+    """转发二进制帧给所有前端。
+
+    自动清理已断开的前端连接。
+
+    Args:
+        frontends: 前端 WebSocket 连接集合（会被原地修改）。
+        data: 二进制 PTY 输出数据。
+        tag: 保留参数，当前未使用。
+    """
+    dead: set[Any] = set()
+    for f in frontends:
+        try:
+            await f.send(data)
+        except Exception:
+            dead.add(f)
+    frontends -= dead
+
+
+async def _send_backend_list(
+    ws: Any,
+    backends: dict[str, Any],
+    backend_modes: dict[str, str] | None = None,
+    current: str | None = None,
+) -> None:
+    """向前端发送当前后端列表。
+
+    Args:
+        ws: 目标前端 WebSocket。
+        backends: 后端名称→连接映射。
+        backend_modes: 后端名称→模式映射。
+        current: 当前选中的后端名称。
+    """
+    if not backends:
+        await ws.send("[Info] No backends connected")
+    else:
+        names: list[str] = []
+        for n in backends:
+            mode = (backend_modes or {}).get(n, "pipe")
+            marker = " *" if n == current else ""
+            names.append(f"{n}({mode}){marker}")
+        lines = [f"[Info] Connected backends: {', '.join(names)}"]
+        if current:
+            lines.append(f"[Info] Current: {current}")
+        await ws.send("\n".join(lines))
+
+
+async def _broadcast_backend_list(
+    frontends: set[Any],
+    backends: dict[str, Any],
+    backend_modes: dict[str, str],
+    frontend_targets: dict[Any, str | None],
+) -> None:
+    """广播后端列表给所有前端。
+
+    自动清理已断开的前端连接。
+
+    Args:
+        frontends: 前端 WebSocket 连接集合（会被原地修改）。
+        backends: 后端名称→连接映射。
+        backend_modes: 后端名称→模式映射。
+        frontend_targets: 前端→当前后端名称映射。
+    """
+    dead: set[Any] = set()
+    for f in frontends:
+        try:
+            current = frontend_targets.get(f)
+            await _send_backend_list(f, backends, backend_modes, current)
+        except Exception:
+            dead.add(f)
+    frontends -= dead
+
+
+# ──────────────────────────────────────────────
+#  RelayState — 中继服务核心状态机
+# ──────────────────────────────────────────────
+
+class RelayState:
+    """管理中继服务的所有连接状态和消息路由。
+
+    Attributes:
+        backends: 后端名称 → WebSocket 连接。
+        backend_modes: 后端名称 → ``"pty"`` | ``"pipe"``。
+        frontends: 所有前端 WebSocket 连接。
+        frontend_targets: 前端连接 → 当前选中的后端名称（``None`` = 自动）。
+    """
+
+    def __init__(
+        self,
+        token: str | None,
+        notifier: _WxPushNotifier | None = None,
+    ) -> None:
+        self.token = token
+        self.notifier = notifier
+        self.backends: dict[str, Any] = {}
+        self.backend_modes: dict[str, str] = {}
+        self.frontends: set[Any] = set()
+        self.frontend_targets: dict[Any, str | None] = {}
+        self._counter: int = 0
+
+    def _next_backend_name(self) -> str:
+        """生成自动后端名称 ``backend-N``。"""
+        self._counter += 1
+        return f"backend-{self._counter}"
+
+    def _resolve_target(self, ws: Any) -> tuple[str, Any] | None:
+        """解析前端当前的目标后端。
+
+        Args:
+            ws: 前端 WebSocket 连接。
+
+        Returns:
+            ``(name, ws_backend)`` 二元组，或 ``None`` 表示无可用后端。
+        """
+        target_name = self.frontend_targets.get(ws)
+        if target_name and target_name in self.backends:
+            return (target_name, self.backends[target_name])
+        # auto: 使用第一个注册的后端
+        if self.backends:
+            return next(iter(self.backends.items()))
+        return None
+
+    def _extract_url_token(self, websocket: Any) -> str | None:
+        """从 WebSocket 连接 URL 中提取 token 参数。"""
+        try:
+            path = "/"
+            if hasattr(websocket, "request"):
                 path = websocket.request.path
-            elif hasattr(websocket, 'path'):
+            elif hasattr(websocket, "path"):
                 path = websocket.path
             parsed = urlparse(path)
             params = parse_qs(parsed.query)
-            tokens = params.get('token', [])
+            tokens = params.get("token", [])
             return tokens[0] if tokens else None
         except Exception:
             return None
 
-    async def _register_frontend(websocket):
-        """注册前端并进入消息循环"""
-        frontends.add(websocket)
-        frontend_targets[websocket] = None
-        logger.info(f"Frontend authenticated (total {len(frontends)})")
-        await _send_backend_list(websocket, backends, backend_modes, None)
+    # ── 后端注册/注销 ──
+
+    async def _register_backend(self, ws: Any, name: str | None, mode: str) -> str:
+        """注册后端连接，返回实际使用的名称。"""
+        if not name:
+            name = self._next_backend_name()
+        self.backends[name] = ws
+        self.backend_modes[name] = mode
+        logger.info(
+            f"Backend registered: '{name}' mode={mode} "
+            f"(total {len(self.backends)})"
+        )
+        # 微信推送：后端上线
+        if self.notifier:
+            await self.notifier.send(
+                f"✅ ws-tunnel: 后端 '{name}' 已上线 ({mode})"
+            )
+        # 通知所有前端后端列表变化
+        await _broadcast_backend_list(
+            self.frontends, self.backends, self.backend_modes,
+            self.frontend_targets,
+        )
+        return name
+
+    async def _unregister_backend(self, name: str) -> None:
+        """注销后端连接并清理关联状态。"""
+        self.backends.pop(name, None)
+        self.backend_modes.pop(name, None)
+        # 如果断开的后端正好是某个前端的当前目标，清除它
+        for f in list(self.frontend_targets):
+            if self.frontend_targets.get(f) == name:
+                self.frontend_targets[f] = None
+        logger.info(f"Backend disconnected: '{name}' (total {len(self.backends)})")
+        if self.notifier:
+            await self.notifier.send(
+                f"❌ ws-tunnel: 后端 '{name}' 已下线"
+            )
+        await _broadcast_backend_list(
+            self.frontends, self.backends, self.backend_modes,
+            self.frontend_targets,
+        )
+
+    # ── 前端注册/注销 ──
+
+    async def _register_frontend(self, ws: Any) -> None:
+        """注册前端连接并进入消息循环。"""
+        self.frontends.add(ws)
+        self.frontend_targets[ws] = None
+        logger.info(f"Frontend authenticated (total {len(self.frontends)})")
+        await _send_backend_list(
+            ws, self.backends, self.backend_modes, None,
+        )
         try:
-            async for message in websocket:
-                await _handle_frontend_message(
-                    websocket, message, backends, frontends,
-                    backend_modes, frontend_targets
-                )
+            async for message in ws:
+                await self._handle_frontend_msg(ws, message)
         except websockets.exceptions.ConnectionClosed:
             pass
-        frontends.discard(websocket)
-        frontend_targets.pop(websocket, None)
-        logger.info(f"Frontend disconnected (total {len(frontends)})")
+        self._unregister_frontend(ws)
 
-    async def handler(websocket, _path=None):
-        nonlocal backends, frontends, _count
+    def _unregister_frontend(self, ws: Any) -> None:
+        """注销前端连接。"""
+        self.frontends.discard(ws)
+        self.frontend_targets.pop(ws, None)
+        logger.info(f"Frontend disconnected (total {len(self.frontends)})")
 
+    # ── 前端消息路由 ──
+
+    async def _handle_frontend_msg(self, ws: Any, message: str | bytes) -> None:
+        """处理前端发出的单条消息（支持文本和二进制）。
+
+        根据消息内容路由到对应的子处理方法。
+        """
+        # 二进制帧：原始按键输入，转发给当前后端
+        if isinstance(message, bytes):
+            await self._forward_binary_to_backend(ws, message)
+            return
+
+        msg = message.strip()
+
+        # LIST: 列举后端
+        if msg.upper() == "LIST":
+            await self._handle_list(ws)
+            return
+
+        # USE [name]: 切换/查看当前后端
+        if msg.upper() == "USE" or msg.upper().startswith("USE "):
+            await self._handle_use(ws, msg)
+            return
+
+        # __RESIZE / __SIGNAL: 控制命令
+        if msg.startswith("__RESIZE:") or msg.startswith("__SIGNAL:"):
+            await self._handle_control(ws, msg)
+            return
+
+        # @name <cmd>: 临时发给指定后端
+        if msg.startswith("@"):
+            await self._handle_at_cmd(ws, msg)
+            return
+
+        # 普通命令: 发送给当前后端
+        await self._send_to_current_backend(ws, msg)
+
+    async def _handle_list(self, ws: Any) -> None:
+        """处理 LIST 命令：列举所有后端。"""
+        current = self.frontend_targets.get(ws)
+        await _send_backend_list(ws, self.backends, self.backend_modes, current)
+
+    async def _handle_use(self, ws: Any, msg: str) -> None:
+        """处理 USE [name] 命令：切换或查看当前后端。"""
+        parts = msg.split(None, 1)
+        if len(parts) == 1:
+            # USE（无参数）: 显示当前目标
+            current = self.frontend_targets.get(ws)
+            if current:
+                await ws.send(f"[Info] Current backend: {current}")
+            else:
+                target = self._resolve_target(ws)
+                if target:
+                    await ws.send(f"[Info] Current backend: {target[0]} (auto)")
+                else:
+                    await ws.send("[Info] No backends connected")
+        else:
+            name = parts[1].strip()
+            if name in self.backends:
+                self.frontend_targets[ws] = name
+                mode = self.backend_modes.get(name, "pipe")
+                await ws.send(f"[Info] Switched to backend: {name}({mode})")
+                logger.info(f"Frontend switched to backend '{name}'")
+            else:
+                await ws.send(
+                    f"[Error] Backend '{name}' not found. "
+                    f"Use LIST to see available backends."
+                )
+
+    async def _handle_at_cmd(self, ws: Any, msg: str) -> None:
+        """处理 ``@name <cmd>`` 命令：临时发给指定后端。"""
+        space = msg.find(" ")
+        if space == -1:
+            await ws.send("[Error] Usage: @backend_name <command>")
+            return
+        name = msg[1:space]
+        cmd = msg[space + 1:]
+        if name in self.backends:
+            try:
+                await self.backends[name].send(cmd)
+            except Exception:
+                await ws.send(f"[Error] Backend '{name}' disconnected")
+                self.backends.pop(name, None)
+        else:
+            await ws.send(
+                f"[Error] Backend '{name}' not found. "
+                f"Use LIST to see available backends."
+            )
+
+    async def _handle_control(self, ws: Any, msg: str) -> None:
+        """处理 ``__RESIZE:rows,cols`` 和 ``__SIGNAL:SIGXXX`` 控制命令。"""
+        target = self._resolve_target(ws)
+        if target:
+            name, ws_backend = target
+            try:
+                await ws_backend.send(msg)
+            except Exception:
+                await ws.send(f"[Error] Backend '{name}' disconnected")
+                self.backends.pop(name, None)
+
+    async def _send_to_current_backend(self, ws: Any, msg: str) -> None:
+        """发送普通文本命令给当前选中的后端。"""
+        target = self._resolve_target(ws)
+        if target:
+            name, ws_backend = target
+            try:
+                await ws_backend.send(msg)
+            except Exception:
+                await ws.send(f"[Error] Backend '{name}' disconnected")
+                self.backends.pop(name, None)
+        else:
+            await ws.send("[Error] No backends connected. Use LIST to check.")
+
+    async def _forward_binary_to_backend(self, ws: Any, data: bytes) -> None:
+        """转发二进制帧（原始按键输入）给当前后端。"""
+        target = self._resolve_target(ws)
+        if target:
+            name, ws_backend = target
+            try:
+                await ws_backend.send(data)
+            except Exception:
+                await ws.send(f"[Error] Backend '{name}' disconnected")
+                self.backends.pop(name, None)
+        else:
+            await ws.send("[Error] No backends connected.")
+
+    # ── 主 handler 入口 ──
+
+    async def handler(self, websocket: Any, _path: object = None) -> None:
+        """WebSocket 连接处理入口。
+
+        由 ``websockets.serve()`` 调用，负责：
+        1. URL token 自动认证（前端）
+        2. 第一条消息角色检测（后端/前端）
+        3. 后端消息转发循环
+        4. 异常和连接清理
+        """
         # ── URL token 自动认证 ──
-        url_token = _extract_url_token(websocket)
-        if url_token and token and url_token == token:
+        url_token = self._extract_url_token(websocket)
+        if url_token and self.token and url_token == self.token:
             await websocket.send("AUTH_OK")
-            await _register_frontend(websocket)
+            await self._register_frontend(websocket)
             return
 
         try:
             first = await asyncio.wait_for(websocket.recv(), timeout=30)
 
             # ── 后端注册 ──
-            backend_info = _parse_backend_auth(first, token)
+            backend_info = _parse_backend_auth(first, self.token)
             if backend_info:
                 name, mode = backend_info
-                if name in backends:
+                if name is None:
+                    name = self._next_backend_name()
+                if name in self.backends:
                     await websocket.close(1008, f"Backend '{name}' already registered")
                     return
-                backends[name] = websocket
-                backend_modes[name] = mode
-                logger.info(
-                    f"Backend registered: '{name}' mode={mode} "
-                    f"(total {len(backends)})"
-                )
-                # 微信推送：后端上线
-                if notifier:
-                    await notifier.send(
-                        f"✅ ws-tunnel: 后端 '{name}' 已上线 ({mode})"
-                    )
-                # 通知所有前端后端列表变化
-                await _broadcast_backend_list(
-                    frontends, backends, backend_modes, frontend_targets
-                )
+                actual_name = await self._register_backend(websocket, name, mode)
                 try:
                     async for message in websocket:
                         # ── 心跳（仅文本） ──
@@ -153,36 +530,23 @@ def _make_handler(token: str | None, notifier: _WxPushNotifier | None = None):
                         # ── 二进制帧：PTY 原始输出，直接转发 ──
                         if isinstance(message, bytes):
                             await _forward_binary_to_frontends(
-                                frontends, message,
-                                name if len(backends) > 1 else None,
+                                self.frontends, message,
+                                actual_name if len(self.backends) > 1 else None,
                             )
                             continue
                         # ── 文本帧：转发给所有前端，多后端时加标签 ──
                         await _forward_to_frontends(
-                            frontends, message, name if len(backends) > 1 else None
+                            self.frontends, message,
+                            actual_name if len(self.backends) > 1 else None,
                         )
                 except websockets.exceptions.ConnectionClosed:
                     pass
-                backends.pop(name, None)
-                backend_modes.pop(name, None)
-                # 如果断开的后端正好是某个前端的当前目标，清除它
-                for f, target in list(frontend_targets.items()):
-                    if target == name:
-                        frontend_targets[f] = None
-                logger.info(f"Backend disconnected: '{name}' (total {len(backends)})")
-                # 微信推送：后端下线
-                if notifier:
-                    await notifier.send(
-                        f"❌ ws-tunnel: 后端 '{name}' 已下线"
-                    )
-                await _broadcast_backend_list(
-                    frontends, backends, backend_modes, frontend_targets
-                )
+                await self._unregister_backend(actual_name)
 
             # ── 前端注册（AUTH 消息认证）──
-            elif _is_frontend_auth(first, token):
+            elif _is_frontend_auth(first, self.token):
                 await websocket.send("AUTH_OK")
-                await _register_frontend(websocket)
+                await self._register_frontend(websocket)
 
             else:
                 await websocket.send("AUTH_FAIL")
@@ -196,256 +560,49 @@ def _make_handler(token: str | None, notifier: _WxPushNotifier | None = None):
             logger.exception(f"Handler error: {e}")
         finally:
             # 清理断开的连接
-            for n, ws in list(backends.items()):
+            for n, ws in list(self.backends.items()):
                 if ws == websocket:
-                    backends.pop(n, None)
-                    backend_modes.pop(n, None)
+                    self.backends.pop(n, None)
+                    self.backend_modes.pop(n, None)
                     break
-            frontends.discard(websocket)
-            frontend_targets.pop(websocket, None)
-
-    return handler
+            self.frontends.discard(websocket)
+            self.frontend_targets.pop(websocket, None)
 
 
-def _parse_backend_auth(msg, token):
-    """解析后端认证消息，返回 (name, mode) 元组，认证失败返回 None
-
-    支持格式:
-      IAM_BACKEND:<token>:<name>:<pty_flag>  → (name, "pty"|"pipe")
-      IAM_BACKEND:<token>:<name>             → (name, "pipe")  # 兼容旧客户端
-      IAM_BACKEND:<token>                    → (auto, "pipe")
-      IAM_BACKEND:<name>:<pty_flag>          → (name, "pty"|"pipe")  # 无 token
-      IAM_BACKEND:<pty_flag>                 → (auto, "pty"|"pipe")  # 无 token
-      IAM_BACKEND                            → (auto, "pipe")        # 最旧兼容
-    """
-    global _backend_counter
-
-    # 只处理文本消息
-    if isinstance(msg, bytes):
-        return None
-
-    msg = msg.strip()
-
-    if token:
-        prefix = f"IAM_BACKEND:{token}"
-    else:
-        prefix = "IAM_BACKEND"
-
-    if not msg.startswith(prefix):
-        return None
-
-    rest = msg[len(prefix):]
-
-    # 收集所有冒号分隔的部分，过滤掉空字符串
-    parts = [p.strip() for p in rest.split(":") if p.strip()] if rest else []
-
-    # 尝试解析 mode 标记（最后一部分如果是 "pty" 或 "pipe"）
-    mode = "pipe"
-    if parts and parts[-1] in ("pty", "pipe"):
-        mode = parts.pop()
-
-    # 提取 name
-    name = parts[0] if parts else None
-
-    if not name:
-        _backend_counter += 1
-        name = f"backend-{_backend_counter}"
-
-    return (name, mode)
-
-
-def _is_frontend_auth(msg, token):
-    """检查消息是否为合法的前端认证"""
-    if isinstance(msg, bytes):
-        return False
-    msg = msg.strip()
-    if token:
-        return msg == f"AUTH:{token}"
-    return True
-
-
-def _resolve_target(frontend_targets, ws, backends):
-    """解析前端当前的目标后端，返回 (name, ws_backend) 或 None"""
-    target_name = frontend_targets.get(ws)
-    if target_name and target_name in backends:
-        return (target_name, backends[target_name])
-    # auto: 使用第一个注册的后端
-    if backends:
-        return next(iter(backends.items()))
-    return None
-
-
-async def _forward_to_frontends(frontends, message, tag=None):
-    """转发文本消息给所有前端，可选加标签"""
-    if tag:
-        payload = f"[@{tag}] {message}"
-    else:
-        payload = message
-    dead = set()
-    for f in frontends:
-        try:
-            await f.send(payload)
-        except Exception:
-            dead.add(f)
-    frontends -= dead
-
-
-async def _forward_binary_to_frontends(frontends, data, tag=None):
-    """转发二进制帧给所有前端"""
-    dead = set()
-    for f in frontends:
-        try:
-            await f.send(data)
-        except Exception:
-            dead.add(f)
-    frontends -= dead
-
-
-async def _send_backend_list(ws, backends, backend_modes=None, current=None):
-    """向前端发送当前后端列表"""
-    if not backends:
-        await ws.send("[Info] No backends connected")
-    else:
-        names = []
-        for n in backends:
-            mode = (backend_modes or {}).get(n, "pipe")
-            marker = " *" if n == current else ""
-            names.append(f"{n}({mode}){marker}")
-        lines = [
-            f"[Info] Connected backends: {', '.join(names)}",
-        ]
-        if current:
-            lines.append(f"[Info] Current: {current}")
-        await ws.send("\n".join(lines))
-
-
-async def _broadcast_backend_list(
-    frontends, backends, backend_modes, frontend_targets
-):
-    """广播后端列表给所有前端"""
-    dead = set()
-    for f in frontends:
-        try:
-            current = frontend_targets.get(f)
-            await _send_backend_list(f, backends, backend_modes, current)
-        except Exception:
-            dead.add(f)
-    frontends -= dead
-
-
-async def _handle_frontend_message(
-    ws, message, backends, frontends, backend_modes, frontend_targets
-):
-    """处理前端发出的命令（支持文本和二进制）"""
-
-    # ── 二进制帧：原始按键输入，转发给当前后端 ──
-    if isinstance(message, bytes):
-        target = _resolve_target(frontend_targets, ws, backends)
-        if target:
-            name, ws_backend = target
-            try:
-                await ws_backend.send(message)
-            except Exception:
-                await ws.send(f"[Error] Backend '{name}' disconnected")
-                backends.pop(name, None)
-        else:
-            await ws.send("[Error] No backends connected.")
-        return
-
-    # ── 以下是文本消息处理 ──
-    msg = message.strip()
-
-    # ── LIST: 列举后端 ──
-    if msg.upper() == "LIST":
-        current = frontend_targets.get(ws)
-        await _send_backend_list(ws, backends, backend_modes, current)
-        return
-
-    # ── USE <name>: 切换当前后端 ──
-    if msg.upper() == "USE" or msg.upper().startswith("USE "):
-        parts = msg.split(None, 1)
-        if len(parts) == 1:
-            # USE (无参数): 显示当前目标
-            current = frontend_targets.get(ws)
-            if current:
-                await ws.send(f"[Info] Current backend: {current}")
-            else:
-                # auto 模式，显示默认目标
-                target = _resolve_target(frontend_targets, ws, backends)
-                if target:
-                    await ws.send(f"[Info] Current backend: {target[0]} (auto)")
-                else:
-                    await ws.send("[Info] No backends connected")
-        else:
-            name = parts[1].strip()
-            if name in backends:
-                frontend_targets[ws] = name
-                mode = backend_modes.get(name, "pipe")
-                await ws.send(f"[Info] Switched to backend: {name}({mode})")
-                logger.info(f"Frontend switched to backend '{name}'")
-            else:
-                await ws.send(
-                    f"[Error] Backend '{name}' not found. "
-                    f"Use LIST to see available backends."
-                )
-        return
-
-    # ── __RESIZE:rows,cols / __SIGNAL:SIGXXX: 控制命令，转发给当前后端 ──
-    if msg.startswith("__RESIZE:") or msg.startswith("__SIGNAL:"):
-        target = _resolve_target(frontend_targets, ws, backends)
-        if target:
-            name, ws_backend = target
-            try:
-                await ws_backend.send(msg)
-            except Exception:
-                await ws.send(f"[Error] Backend '{name}' disconnected")
-                backends.pop(name, None)
-        return
-
-    # ── @name <cmd>: 临时发给指定后端（不影响当前选择）──
-    if msg.startswith("@"):
-        space = msg.find(" ")
-        if space == -1:
-            await ws.send("[Error] Usage: @backend_name <command>")
-            return
-        name = msg[1:space]
-        cmd = msg[space + 1:]
-        if name in backends:
-            try:
-                await backends[name].send(cmd)
-            except Exception:
-                await ws.send(f"[Error] Backend '{name}' disconnected")
-                backends.pop(name, None)
-        else:
-            await ws.send(
-                f"[Error] Backend '{name}' not found. "
-                f"Use LIST to see available backends."
-            )
-        return
-
-    # ── 普通命令: 发送给当前后端 ──
-    target = _resolve_target(frontend_targets, ws, backends)
-    if target:
-        name, ws_backend = target
-        try:
-            await ws_backend.send(msg)
-        except Exception:
-            await ws.send(f"[Error] Backend '{name}' disconnected")
-            backends.pop(name, None)
-    else:
-        await ws.send("[Error] No backends connected. Use LIST to check.")
-
+# ──────────────────────────────────────────────
+#  公共 API
+# ──────────────────────────────────────────────
 
 def _create_ssl_context(cert_path: str, key_path: str) -> ssl.SSLContext:
-    """从证书文件创建 SSL 上下文"""
+    """从证书文件创建 SSL 上下文。
+
+    Args:
+        cert_path: TLS 证书文件路径。
+        key_path: TLS 私钥文件路径。
+
+    Returns:
+        配置好的 ``SSLContext`` 实例。
+    """
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(cert_path, key_path)
     logger.info(f"TLS enabled (cert={cert_path})")
     return ctx
 
 
-async def _run_async(host: str, port: int, handler, ssl_context=None):
-    """异步运行中继服务"""
+async def _run_async(
+    host: str,
+    port: int,
+    handler: Any,
+    ssl_context: ssl.SSLContext | None = None,
+) -> None:
+    """异步运行中继服务。
+
+    Args:
+        host: 监听地址。
+        port: 监听端口。
+        handler: WebSocket 连接处理函数。
+        ssl_context: 可选 SSL 上下文，启用 ``wss://``。
+    """
     async with websockets.serve(
         handler, host, port,
         ssl=ssl_context,
@@ -457,23 +614,30 @@ async def _run_async(host: str, port: int, handler, ssl_context=None):
         await asyncio.Future()
 
 
-def run_relay(host: str = "0.0.0.0", port: int = 8080, token: str | None = None,
-              cert_path: str | None = None, key_path: str | None = None,
-              wxpush: str | None = None):
-    """启动 WebSocket 中继服务
+def run_relay(
+    host: str = "0.0.0.0",
+    port: int = 8080,
+    token: str | None = None,
+    cert_path: str | None = None,
+    key_path: str | None = None,
+    wxpush: str | None = None,
+) -> None:
+    """启动 WebSocket 中继服务。
 
     Args:
-        host: 监听地址，默认 0.0.0.0
-        port: 监听端口，默认 8080
-        token: 可选认证令牌。None = 不开启认证（向后兼容）
-        wxpush: 微信推送通知，格式 url:key
+        host: 监听地址，默认 ``0.0.0.0``。
+        port: 监听端口，默认 ``8080``。
+        token: 可选认证令牌。``None`` = 不开启认证（向后兼容）。
+        cert_path: TLS 证书路径。
+        key_path: TLS 私钥路径。
+        wxpush: 微信推送通知，格式 ``url:key``。
     """
     if token:
         logger.info(f"Authentication enabled (token={token[:8]}...)")
     else:
         logger.warning("No token set — anyone can connect!")
 
-    notifier = None
+    notifier: _WxPushNotifier | None = None
     if wxpush:
         try:
             url, key = wxpush.rsplit(":", 1)
@@ -482,9 +646,9 @@ def run_relay(host: str = "0.0.0.0", port: int = 8080, token: str | None = None,
         except ValueError:
             logger.error(f"Invalid --wxpush format, expected url:key, got: {wxpush}")
 
-    ssl_context = None
+    ssl_context: ssl.SSLContext | None = None
     if cert_path:
         ssl_context = _create_ssl_context(cert_path, key_path or cert_path)
 
-    handler = _make_handler(token, notifier)
-    asyncio.run(_run_async(host, port, handler, ssl_context))
+    state = RelayState(token, notifier)
+    asyncio.run(_run_async(host, port, state.handler, ssl_context))
