@@ -349,8 +349,18 @@ class TestBroadcastFunctions:
     async def test_forward_binary(self):
         ws = MockWebSocket()
         frontends = {ws}
-        await _forward_binary_to_frontends(frontends, b"\x01\x02")
+        await _forward_binary_to_frontends(frontends, b"\x01\x02", {})
         assert b"\x01\x02" in ws.sent
+
+    @pytest.mark.asyncio
+    async def test_forward_binary_text_mode_strips_ansi(self):
+        ws = MockWebSocket()
+        frontends = {ws}
+        # 含 ANSI 颜色码的 PTY 输出
+        ansi_data = b"\x1b[01;32mfile.txt\x1b[0m\r\ndata\r\n"
+        await _forward_binary_to_frontends(frontends, ansi_data, {ws: True})
+        # 文本模式应收到剥离 ANSI 的文本帧
+        assert any(isinstance(m, str) and "file.txt" in m and "\x1b" not in m for m in ws.sent)
 
     @pytest.mark.asyncio
     async def test_send_backend_list_with_backends(self):

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import ssl
 from typing import Any
 from urllib.parse import urlparse, parse_qs
@@ -35,6 +36,22 @@ import httpx
 import websockets
 
 logger = logging.getLogger(__name__)
+
+# 匹配 ANSI 转义序列：ESC [ ... 最终字节，以及 ESC ] ... BEL/ST
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][AB012]|\x1b\[[?][0-9;]*[a-zA-Z]")
+
+
+def _strip_ansi(data: bytes) -> str:
+    """将 PTY 二进制输出转为干净文本，剥离 ANSI 转义序列。
+
+    Args:
+        data: PTY 原始输出（含 ANSI 转义码）。
+
+    Returns:
+        清理后的纯文本字符串。
+    """
+    text = data.decode("utf-8", errors="replace")
+    return _ANSI_RE.sub("", text)
 
 
 # ──────────────────────────────────────────────
@@ -158,21 +175,30 @@ async def _forward_to_frontends(
 async def _forward_binary_to_frontends(
     frontends: set[Any],
     data: bytes,
+    frontend_text_modes: dict[Any, bool],
     tag: str | None = None,
 ) -> None:
     """转发二进制帧给所有前端。
 
+    文本模式前端会收到剥离 ANSI 转义码的文本帧，其余前端收到原始二进制帧。
     自动清理已断开的前端连接。
 
     Args:
         frontends: 前端 WebSocket 连接集合（会被原地修改）。
         data: 二进制 PTY 输出数据。
+        frontend_text_modes: 前端连接 → 是否文本模式。
         tag: 保留参数，当前未使用。
     """
     dead: set[Any] = set()
     for f in frontends:
         try:
-            await f.send(data)
+            if frontend_text_modes.get(f):
+                # 文本模式：剥离 ANSI，以文本帧发送
+                text = _strip_ansi(data)
+                if text:
+                    await f.send(text)
+            else:
+                await f.send(data)
         except Exception:
             dead.add(f)
     frontends -= dead
@@ -244,6 +270,7 @@ class RelayState:
         backend_modes: 后端名称 → ``"pty"`` | ``"pipe"``。
         frontends: 所有前端 WebSocket 连接。
         frontend_targets: 前端连接 → 当前选中的后端名称（``None`` = 自动）。
+        frontend_text_modes: 前端连接 → 是否启用文本模式（剥离 ANSI）。
     """
 
     def __init__(
@@ -257,6 +284,7 @@ class RelayState:
         self.backend_modes: dict[str, str] = {}
         self.frontends: set[Any] = set()
         self.frontend_targets: dict[Any, str | None] = {}
+        self.frontend_text_modes: dict[Any, bool] = {}
         self._counter: int = 0
 
     def _next_backend_name(self) -> str:
@@ -359,6 +387,7 @@ class RelayState:
         """注销前端连接。"""
         self.frontends.discard(ws)
         self.frontend_targets.pop(ws, None)
+        self.frontend_text_modes.pop(ws, None)
         logger.info(f"Frontend disconnected (total {len(self.frontends)})")
 
     # ── 前端消息路由 ──
@@ -385,9 +414,19 @@ class RelayState:
             await self._handle_use(ws, msg)
             return
 
-        # __RESIZE / __SIGNAL: 控制命令
+        # __RESIZE / __SIGNAL / __TEXT: 控制命令
         if msg.startswith("__RESIZE:") or msg.startswith("__SIGNAL:"):
             await self._handle_control(ws, msg)
+            return
+
+        # __TEXT: 切换文本模式（剥离 ANSI 转义码）
+        if msg == "__TEXT":
+            self.frontend_text_modes[ws] = True
+            await ws.send("[Info] Text mode enabled (ANSI stripped)")
+            return
+        if msg == "__RAW":
+            self.frontend_text_modes[ws] = False
+            await ws.send("[Info] Raw mode enabled (binary PTY)")
             return
 
         # @name <cmd>: 临时发给指定后端
@@ -531,6 +570,7 @@ class RelayState:
                         if isinstance(message, bytes):
                             await _forward_binary_to_frontends(
                                 self.frontends, message,
+                                self.frontend_text_modes,
                                 actual_name if len(self.backends) > 1 else None,
                             )
                             continue
@@ -567,6 +607,7 @@ class RelayState:
                     break
             self.frontends.discard(websocket)
             self.frontend_targets.pop(websocket, None)
+            self.frontend_text_modes.pop(websocket, None)
 
 
 # ──────────────────────────────────────────────
