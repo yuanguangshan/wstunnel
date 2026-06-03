@@ -323,6 +323,7 @@ function initTerminal() {
   term.textarea.addEventListener('compositionend', (e) => {
     const text = e.data || term.textarea.value;
     if (text && ws && ws.readyState === WebSocket.OPEN) {
+      term.textarea.value = '';     // 清空，防止 xterm bubble 阶段再发一次
       ws.send(new TextEncoder().encode(text));
     }
   }, { capture: true });
