@@ -59,6 +59,82 @@
     opacity: 0.5; transition: opacity 0.2s;
   }
   #clear-btn:hover { opacity: 1; color: #fff; }
+
+  /* ── 集群面板 ── */
+  #cluster-btn {
+    font: 12px monospace;
+    background: #0f3460; color: #aaa;
+    border: 1px solid #0f3460; border-radius: 4px;
+    padding: 4px 8px; cursor: pointer;
+  }
+  #cluster-btn:hover { color: #fff; }
+  #cluster-btn.active { background: #1a4a8a; color: #fff; }
+  #cluster-panel {
+    position: fixed; top: 0; right: 0;
+    width: 380px; height: 100vh;
+    background: #1a1a2e; border-left: 1px solid #333;
+    z-index: 30; display: flex; flex-direction: column;
+    font: 13px/1.5 system-ui, sans-serif; color: #ccc;
+  }
+  #cluster-header {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 10px 12px; border-bottom: 1px solid #333;
+    font-weight: bold; color: #fff;
+  }
+  #cluster-close {
+    background: none; border: none; color: #666; font-size: 16px;
+    cursor: pointer; padding: 2px 6px;
+  }
+  #cluster-close:hover { color: #fff; }
+  #cluster-body { flex: 1; overflow-y: auto; padding: 10px 12px; }
+  #cluster-table {
+    width: 100%; border-collapse: collapse; margin-bottom: 16px;
+  }
+  #cluster-table th {
+    text-align: left; padding: 6px 8px;
+    border-bottom: 1px solid #333; color: #888; font-size: 11px;
+    text-transform: uppercase;
+  }
+  #cluster-table td {
+    padding: 6px 8px; border-bottom: 1px solid #222;
+    font-family: Menlo, Monaco, monospace; font-size: 12px;
+  }
+  #cluster-table .name { color: #eee; }
+  #cluster-table .mode {
+    color: #888; font-size: 11px;
+  }
+  #cluster-table .status-dot {
+    display: inline-block; width: 8px; height: 8px;
+    border-radius: 50%; margin-right: 4px;
+  }
+  #cluster-table .status-dot.online { background: #2ecc71; }
+  #cluster-table .status-dot.offline { background: #e74c3c; }
+  .cluster-section {
+    margin-bottom: 12px;
+  }
+  .cluster-section h4 {
+    font-size: 11px; color: #888; text-transform: uppercase;
+    margin-bottom: 8px; letter-spacing: 1px;
+  }
+  .cluster-row {
+    display: flex; gap: 6px;
+  }
+  .cluster-row input,
+  .cluster-row select {
+    flex: 1; padding: 6px 8px; font-size: 12px;
+    background: #16213e; color: #eee;
+    border: 1px solid #333; border-radius: 4px; outline: none;
+    font-family: Menlo, Monaco, monospace;
+  }
+  .cluster-row input:focus { border-color: #0f3460; }
+  .cluster-row button {
+    padding: 6px 12px; font-size: 12px;
+    background: #0f3460; color: #eee;
+    border: none; border-radius: 4px; cursor: pointer;
+    white-space: nowrap;
+  }
+  .cluster-row button:hover { background: #1a4a8a; }
+  .cluster-row select { cursor: pointer; }
 </style>
 </head>
 <body>
@@ -66,6 +142,7 @@
 <div id="top-bar">
   <select id="backend-select" disabled><option>—</option></select>
   <span id="status">Disconnected</span>
+  <button id="cluster-btn" class="hidden">📊 集群</button>
 </div>
 
 <!-- 连接表单 -->
@@ -79,6 +156,35 @@
 
 <!-- 终端 -->
 <div id="terminal" class="hidden"></div>
+
+<!-- 集群面板 -->
+<div id="cluster-panel" class="hidden">
+  <div id="cluster-header">
+    <span>📊 集群仪表板</span>
+    <button id="cluster-close">✕</button>
+  </div>
+  <div id="cluster-body">
+    <table id="cluster-table">
+      <thead><tr><th>后端</th><th>模式</th><th>状态</th></tr></thead>
+      <tbody id="cluster-tbody"></tbody>
+    </table>
+    <div class="cluster-section">
+      <h4>@all 批量命令</h4>
+      <div class="cluster-row">
+        <input id="cluster-all-input" placeholder="发送给全部后端…" />
+        <button id="cluster-all-btn">全部执行</button>
+      </div>
+    </div>
+    <div class="cluster-section">
+      <h4>单独发送</h4>
+      <div class="cluster-row">
+        <select id="cluster-single-select"><option>—</option></select>
+        <input id="cluster-single-input" placeholder="命令…" />
+        <button id="cluster-single-btn">发送</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <!-- 清除存储按钮 -->
 <button id="clear-btn">清除</button>
@@ -344,6 +450,81 @@ document.getElementById('backend-select').addEventListener('change', function() 
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send('USE ' + this.value);
   }
+});
+
+// ── 集群面板 ──
+let _listTimer = null;
+
+function renderCluster() {
+  const tbody = document.getElementById('cluster-tbody');
+  const sel = document.getElementById('cluster-single-select');
+  tbody.innerHTML = backends.map(b => {
+    const current = b.endsWith(' *');
+    const display = current ? b.slice(0, -2).trim() : b;
+    const name = display.replace(/\s*\([^)]*\)$/, '');
+    const mode = display.match(/\(([^)]+)\)/)?.[1] || '?';
+    return `<tr>
+      <td class="name">${current ? '<b>' : ''}${name}${current ? '</b>' : ''}</td>
+      <td class="mode">${mode}</td>
+      <td><span class="status-dot online"></span></td>
+    </tr>`;
+  }).join('');
+  sel.innerHTML = backends.map(b => {
+    const n = (b.replace(/\s*\*$/, '').replace(/\s*\([^)]*\)$/, '')).trim();
+    return `<option value="${n}">${n}</option>`;
+  }).join('');
+  document.getElementById('cluster-btn').classList.remove('hidden');
+}
+
+// 监听后端列表更新（handleRelayText 已更新 backends）
+const _origHandle = handleRelayText;
+handleRelayText = function(text) {
+  _origHandle(text);
+  if (text.startsWith('[Info] Connected backends:')) {
+    renderCluster();
+    clearInterval(_listTimer);
+    _listTimer = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send('LIST');
+    }, 10000);
+  }
+};
+
+document.getElementById('cluster-btn').addEventListener('click', function() {
+  const p = document.getElementById('cluster-panel');
+  p.classList.toggle('hidden');
+  this.classList.toggle('active');
+});
+document.getElementById('cluster-close').addEventListener('click', function() {
+  document.getElementById('cluster-panel').classList.add('hidden');
+  document.getElementById('cluster-btn').classList.remove('active');
+});
+
+// @all 批量执行
+document.getElementById('cluster-all-btn').addEventListener('click', function() {
+  const cmd = document.getElementById('cluster-all-input').value.trim();
+  if (!cmd || !ws || ws.readyState !== WebSocket.OPEN) return;
+  backends.forEach(b => {
+    const name = (b.replace(/\s*\*$/, '').replace(/\s*\([^)]*\)$/, '')).trim();
+    ws.send(`@${name} ${cmd}`);
+  });
+  document.getElementById('cluster-all-input').value = '';
+  term.write(`\r\n📡 @all: ${cmd}\r\n`);
+});
+document.getElementById('cluster-all-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('cluster-all-btn').click();
+});
+
+// 单独发送
+document.getElementById('cluster-single-btn').addEventListener('click', function() {
+  const sel = document.getElementById('cluster-single-select');
+  const cmd = document.getElementById('cluster-single-input').value.trim();
+  if (!sel.value || !cmd || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(`@${sel.value} ${cmd}`);
+  document.getElementById('cluster-single-input').value = '';
+  term.write(`\r\n📡 @${sel.value}: ${cmd}\r\n`);
+});
+document.getElementById('cluster-single-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('cluster-single-btn').click();
 });
 
 // 自动连接：URL 有参数，或 localStorage 有值时
