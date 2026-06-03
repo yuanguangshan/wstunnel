@@ -319,14 +319,7 @@ function initTerminal() {
     }
   });
 
-  // IME 中文输入：capture 阶段读取 textarea，在 xterm 清空前拿到字符
-  term.textarea.addEventListener('compositionend', (e) => {
-    const text = e.data || term.textarea.value;
-    if (text && ws && ws.readyState === WebSocket.OPEN) {
-      term.textarea.value = '';     // 清空，防止 xterm bubble 阶段再发一次
-      ws.send(new TextEncoder().encode(text));
-    }
-  }, { capture: true });
+  // IME 中文输入让 xterm 内部处理，onData 会收到最终选中的字符
 }
 
 // 后端选择器默认隐藏，收到后端列表后显示
