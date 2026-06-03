@@ -305,10 +305,10 @@ wsstunnel 自带一个基于 xterm.js 的 Web 终端，浏览器打开即用：
 
 ```bash
 # 直接打开
-open web/index.html
+open wsstunnel/web/index.html
 
 # 或传参自动连接（推荐书签）
-open "web/index.html?server=wss://your-vps:443&token=mysecret"
+open "wsstunnel/web/index.html?server=wss://your-vps:443&token=mysecret"
 ```
 
 页面功能：
@@ -318,7 +318,7 @@ open "web/index.html?server=wss://your-vps:443&token=mysecret"
 - **URL token 认证**：`?token=xxx` 自动连接，无需手动输入
 - **连接管理**：断开后可重连，显示连接状态
 
-你也可以通过 `web/index.html?server=ws://your-vps:8080` 直接连接 ws:// 中继。
+你也可以通过 `wsstunnel/web/index.html?server=ws://your-vps:8080` 直接连接 ws:// 中继。
 
 ### 工作流 D：系统服务（systemd 自动启动）
 

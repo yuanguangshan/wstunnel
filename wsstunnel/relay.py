@@ -50,7 +50,11 @@ _INDEX_HTML: bytes | None = None
 def _load_index_html() -> bytes | None:
     """从已知路径加载嵌入式 Web 终端页面。"""
     candidates = [
+        # pip 安装后：relay.py 同目录的 web/ 子目录
+        os.path.join(os.path.dirname(__file__), "web", "index.html"),
+        # 开发模式：项目根目录的 web/
         os.path.join(os.getcwd(), "web", "index.html"),
+        # 源码目录（可编辑安装 -e .）
         os.path.join(os.path.dirname(os.path.dirname(__file__)), "web", "index.html"),
     ]
     for path in candidates:
