@@ -319,15 +319,13 @@ function initTerminal() {
     }
   });
 
-  // IME 中文输入：直接在 textarea 上监听 compositionend，
-  // 从中读取最终字符发送，绕过 xterm 可能的 onData 遗漏
-  term.textarea.addEventListener('compositionend', () => {
-    const text = term.textarea.value;
+  // IME 中文输入：capture 阶段读取 textarea，在 xterm 清空前拿到字符
+  term.textarea.addEventListener('compositionend', (e) => {
+    const text = e.data || term.textarea.value;
     if (text && ws && ws.readyState === WebSocket.OPEN) {
-      term.textarea.value = '';
       ws.send(new TextEncoder().encode(text));
     }
-  });
+  }, { capture: true });
 }
 
 // 后端选择器默认隐藏，收到后端列表后显示
