@@ -326,12 +326,12 @@ function initTerminal() {
     }
   });
 
-  // 移动端 IME 中文输入和粘贴兜底（xterm onData 在移动端不可靠）
+  // 移动端兜底：iOS 中文键盘用 insertText（非 insertFromComposition）
   if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
-    term.textarea.addEventListener('compositionstart', () => { _composing = true; });
-    term.textarea.addEventListener('compositionend', (e) => {
-      _composing = false;
-      if (e.data) mobileSend(e.data);
+    term.textarea.addEventListener('beforeinput', (e) => {
+      if (e.data && (e.inputType === 'insertText' || e.inputType === 'insertFromComposition')) {
+        mobileSend(e.data);
+      }
     });
     term.textarea.addEventListener('paste', (e) => {
       const text = (e.clipboardData || window.clipboardData).getData('text/plain');
