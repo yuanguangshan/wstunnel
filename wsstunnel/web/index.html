@@ -346,8 +346,10 @@ function handleRelayText(text) {
       if (opt.value === name) { opt.selected = true; break; }
     }
   }
-  // 将文本回复也写入终端显示
-  if (term) term.write(text + '\r\n');
+  // 将文本回复写入终端显示（仅重要消息，不写 LIST 刷新）
+  if (term && !text.startsWith('[Info] Connected backends:')) {
+    term.write(text + '\r\n');
+  }
 }
 
 function initTerminal() {
@@ -491,8 +493,10 @@ handleRelayText = function(text) {
 
 document.getElementById('cluster-btn').addEventListener('click', function() {
   const p = document.getElementById('cluster-panel');
+  const opening = p.classList.contains('hidden');
   p.classList.toggle('hidden');
   this.classList.toggle('active');
+  if (opening && ws && ws.readyState === WebSocket.OPEN) ws.send('LIST');
 });
 document.getElementById('cluster-close').addEventListener('click', function() {
   document.getElementById('cluster-panel').classList.add('hidden');
