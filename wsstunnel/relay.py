@@ -410,7 +410,7 @@ class RelayState:
         # 微信推送：后端上线
         if self.notifier:
             await self.notifier.send(
-                f"✅ ws-tunnel: 后端 '{name}' 已上线 ({mode})"
+                f"✅ wsstunnel: {name} 已上线 ({mode})"
             )
         # 通知所有前端后端列表变化
         await _broadcast_backend_list(
@@ -431,7 +431,7 @@ class RelayState:
         logger.info(f"Backend disconnected: '{name}' (total {len(self.backends)})")
         if self.notifier:
             await self.notifier.send(
-                f"❌ ws-tunnel: 后端 '{name}' 已下线"
+                f"❌ wsstunnel: {name} 已下线"
             )
         await _broadcast_backend_list(
             self.frontends, self.backends, self.backend_modes,
