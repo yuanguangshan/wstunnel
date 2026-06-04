@@ -506,7 +506,7 @@ document.getElementById('cluster-all-btn').addEventListener('click', function() 
   if (!cmd || !ws || ws.readyState !== WebSocket.OPEN) return;
   backends.forEach((b, i) => {
     const name = b.replace(/ ↑[^ ]+/, '').replace(/\s*\*$/, '').replace(/\s*\([^)]*\)$/, '').trim();
-    setTimeout(() => ws.send(`@${name} ${cmd}`), i * 200);
+    setTimeout(() => ws.send(`@${name} echo "==== ${name} ====" && ${cmd}`), i * 200);
   });
   document.getElementById('cluster-all-input').value = '';
   term.write(`\r\n╔════ @all: ${cmd} ═══════════════╗\r\n`);
