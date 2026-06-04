@@ -421,6 +421,18 @@ class RelayState:
 
     async def _unregister_backend(self, name: str) -> None:
         """注销后端连接并清理关联状态。"""
+        # 下线前先算运行时长
+        elapsed = ""
+        conn_time = self.backend_connected_at.get(name)
+        if conn_time:
+            secs = int(time.time() - conn_time)
+            if secs < 60:
+                elapsed = f"（运行 {secs}s）"
+            elif secs < 3600:
+                elapsed = f"（运行 {secs // 60}m）"
+            else:
+                h, m = secs // 3600, (secs % 3600) // 60
+                elapsed = f"（运行 {h}h{m}m）"
         self.backends.pop(name, None)
         self.backend_modes.pop(name, None)
         self.backend_connected_at.pop(name, None)
@@ -431,7 +443,7 @@ class RelayState:
         logger.info(f"Backend disconnected: '{name}' (total {len(self.backends)})")
         if self.notifier:
             await self.notifier.send(
-                f"❌ wsstunnel: {name} 已下线"
+                f"❌ wsstunnel: {name} 已下线{elapsed}"
             )
         await _broadcast_backend_list(
             self.frontends, self.backends, self.backend_modes,
