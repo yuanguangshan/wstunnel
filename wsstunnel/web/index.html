@@ -300,8 +300,10 @@ function connect() {
     } else {
       if (term) term.write(new Uint8Array(e.data));
     }
-    // iOS 上 term.write 可能导致 textarea 失焦，确保焦点在 textarea 上
-    if (term && term.textarea && document.activeElement !== term.textarea) {
+    // 保持焦点：如果用户在面板输入框中，不抢焦点
+    const panelInputs = ['cluster-all-input', 'cluster-single-input'];
+    if (term && term.textarea && document.activeElement !== term.textarea
+        && !panelInputs.includes(document.activeElement?.id)) {
       term.textarea.focus();
     }
   };
