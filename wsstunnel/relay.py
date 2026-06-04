@@ -247,11 +247,8 @@ async def _forward_binary_to_frontends(
     dead: set[Any] = set()
     for f in frontends:
         try:
-            # 多后端时，每个后端输出前发一条 [@name] 文本标记
-            if tag and f._last_tag != tag:
-                await f.send(f"[@{tag}]")
-                f._last_tag = tag
             if frontend_text_modes.get(f):
+                # 文本模式：剥离 ANSI，以文本帧发送
                 text = _strip_ansi(data)
                 if text:
                     await f.send(text)
