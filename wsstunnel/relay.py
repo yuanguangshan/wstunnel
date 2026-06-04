@@ -85,7 +85,7 @@ async def _http_request_handler(connection: Any, request: Any) -> Response | Non
         return None
     # request.path 包含 query string（如 /wstunnel?token=xxx），需去掉
     clean_path = request.path.split("?")[0]
-    if clean_path in ("/", "/index.html", "/wstunnel"):
+    if clean_path in ("/", "/index.html", "/wstunnel", "/wsstunnel"):
         headers = Headers()
         headers["Content-Type"] = "text/html; charset=utf-8"
         return Response(200, "OK", headers, _INDEX_HTML)
