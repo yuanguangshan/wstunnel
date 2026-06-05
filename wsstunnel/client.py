@@ -38,6 +38,35 @@ _FILE_CHUNK_SIZE = 65536    # 文件传输每块大小（64KB）
 # 正在进行的文件传输状态：path -> {file, total, received}
 _file_transfers: dict[str, dict] = {}
 
+# shell 当前工作目录追踪（拦截 cd 命令自动更新）
+_cwd: str = os.getcwd()
+
+
+def _update_cwd(cmd: str) -> None:
+    """根据 shell 命令更新追踪的当前工作目录。"""
+    global _cwd
+    # 只处理 cd 命令
+    stripped = cmd.strip()
+    if not (stripped.startswith("cd ") or stripped == "cd"):
+        return
+    parts = stripped.split()
+    if len(parts) == 1:
+        # cd（无参数）→ $HOME
+        target = os.environ.get("HOME", "/")
+    else:
+        target = parts[1]
+        # 处理 ~ 开头的路径
+        if target.startswith("~/"):
+            home = os.environ.get("HOME", "/")
+            target = os.path.join(home, target[2:])
+        elif target == "~":
+            target = os.environ.get("HOME", "/")
+        # 非绝对路径：相对于当前 _cwd
+        if not os.path.isabs(target):
+            target = os.path.normpath(os.path.join(_cwd, target))
+    _cwd = target
+    logger.debug(f"CWD tracked: {_cwd}")
+
 
 # ──────────────────────────────────────────────
 #  终端与信号工具
@@ -138,6 +167,15 @@ def _unb64(s: str) -> str:
     return base64.b64decode(s).decode()
 
 
+def _resolve_path(path: str) -> str:
+    """解析上传/下载路径：相对路径自动拼接 shell 当前目录。"""
+    if path.startswith("./") or path.startswith("~"):
+        return os.path.normpath(os.path.join(_cwd, path))
+    if not os.path.isabs(path):
+        return os.path.normpath(os.path.join(_cwd, path))
+    return path
+
+
 def _handle_file_cmd(msg: str, ws: websocket.WebSocket) -> bool:
     """处理文件传输命令。返回 True 表示 msg 已被文件模块消费。"""
     global _file_transfers
@@ -148,7 +186,7 @@ def _handle_file_cmd(msg: str, ws: websocket.WebSocket) -> bool:
         if len(parts) < 3:
             return True
         try:
-            path = _unb64(parts[1])
+            path = _resolve_path(_unb64(parts[1]))
             total = int(parts[2])
             os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
             f = open(path, "wb")
@@ -215,7 +253,7 @@ def _handle_file_cmd(msg: str, ws: websocket.WebSocket) -> bool:
     # ── 下载：前端请求 ──
     if msg.startswith("__FILE_DOWNLOAD:"):
         try:
-            path = _unb64(msg.split(":", 1)[1])
+            path = _resolve_path(_unb64(msg.split(":", 1)[1]))
         except Exception:
             return True
         _send_file(path, ws)
@@ -225,6 +263,7 @@ def _handle_file_cmd(msg: str, ws: websocket.WebSocket) -> bool:
     if msg.startswith("dl ") and not msg.startswith("__"):
         path = msg[3:].strip()
         if path:
+            path = _resolve_path(path)
             logger.info(f"Shell download request: {path}")
             ws.send(f"[Info] Downloading {path}...")
             _send_file(path, ws)
@@ -452,6 +491,8 @@ def _run_pty_mode(
                         sig_name = msg.split(":", 1)[1].strip()
                         _send_signal(shell_proc, sig_name)
                         continue
+                    # 追踪 cd 命令更新当前目录
+                    _update_cwd(msg)
                     os.write(master_fd, (msg + "\n").encode())
         except websocket.WebSocketConnectionClosedException:
             logger.warning("WebSocket connection closed")
@@ -548,6 +589,7 @@ def _run_pipe_mode(
                 continue
             # ── 正常命令，转发给 shell ──
             logger.debug(f"Command: {cmd.strip()[:60]}")
+            _update_cwd(cmd)
             shell_proc.stdin.write((cmd + "\n").encode())
             shell_proc.stdin.flush()
     except websocket.WebSocketConnectionClosedException:
