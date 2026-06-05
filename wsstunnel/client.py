@@ -496,7 +496,12 @@ def _run_pty_mode(
                     global _key_buffer
                     try:
                         ch = msg.decode("utf-8")
-                        _key_buffer += ch
+                        # Ctrl+C 清空缓冲（bash 行被取消）
+                        if ch == "\x03":
+                            _key_buffer = ""
+                        # 只缓冲可打印字符和回车/换行
+                        elif ch.isprintable() or ch in ("\r", "\n", "\x7f"):
+                            _key_buffer += ch
                         if ch in ("\r", "\n"):
                             line = _key_buffer.replace("\r", "").replace("\n", "").strip()
                             _key_buffer = ""
