@@ -2,12 +2,12 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <title>wsstunnel - Web 终端</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm/css/xterm.css" />
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; background: #1a1a2e; overflow: hidden; }
+  html, body { width: 100%; height: 100%; background: #1a1a2e; overflow: hidden; touch-action: manipulation; }
   #terminal { width: 100vw; height: 100vh; padding: 8px; }
   #terminal .xterm { height: 100%; }
   #terminal .xterm-viewport { height: 100% !important; }
@@ -779,15 +779,19 @@ function fabSend(key) {
   }
   if (bytes) {
     ws.send(new Uint8Array(bytes));
-    // 焦点留在终端，方便连续按键
-    if (term && term.textarea) term.textarea.focus();
   }
 }
 
 document.getElementById('fab').addEventListener('click', function() {
   const panel = document.getElementById('fab-panel');
+  const opening = !this.classList.contains('active');
   this.classList.toggle('active');
   panel.classList.toggle('show');
+  // 打开面板时收起系统键盘，关闭时恢复
+  if (term && term.textarea) {
+    if (opening) term.textarea.blur();
+    else setTimeout(() => term.textarea.focus(), 100);
+  }
 });
 
 document.getElementById('fab-panel').addEventListener('click', function(e) {
