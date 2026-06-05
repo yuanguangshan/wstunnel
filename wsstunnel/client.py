@@ -438,6 +438,7 @@ def _run_pty_mode(
         shell: shell 可执行文件路径。
         reconnect_event: 重连事件。
     """
+    global _key_buffer
     max_restarts = 5
     restart_count = 0
 
@@ -481,6 +482,10 @@ def _run_pty_mode(
         t = threading.Thread(target=read_pty_output, args=(master_fd, shell_proc, shell_restart), daemon=True)
         t.start()
 
+        # 新 shell 会话，重置按键缓冲
+        global _key_buffer
+        _key_buffer = ""
+
         try:
             while not shell_restart.is_set() and not reconnect_event.is_set():
                 try:
@@ -492,7 +497,6 @@ def _run_pty_mode(
                     break
                 if isinstance(msg, bytes):
                     # 缓冲按键，检测 dl 命令（前端拦截不可靠，特别是移动端）
-                    global _key_buffer
                     try:
                         ch = msg.decode("utf-8")
                         # Ctrl+C 清空缓冲（bash 行被取消）
