@@ -53,6 +53,29 @@
   }
   #clear-btn:hover { opacity: 1; color: #fff; }
 
+  /* ── 文件传输 ── */
+  #file-btn {
+    font: 12px monospace;
+    background: #0f3460; color: #aaa;
+    border: 1px solid #0f3460; border-radius: 4px;
+    padding: 4px 8px; cursor: pointer;
+  }
+  #file-btn:hover { color: #fff; }
+  #file-btn.dl { background: #2c3e50; }
+  #file-info {
+    position: fixed; bottom: 40px; right: 10px;
+    background: #1a1a2e; color: #ccc;
+    border: 1px solid #333; border-radius: 6px;
+    padding: 8px 14px; font: 12px monospace; z-index: 20;
+    display: none; max-width: 400px;
+  }
+  #file-info .progress {
+    margin-top: 4px; height: 4px; background: #333; border-radius: 2px;
+  }
+  #file-info .progress-bar {
+    height: 100%; background: #2ecc71; border-radius: 2px; transition: width 0.3s;
+  }
+
   /* ── 集群面板 ── */
   #cluster-btn {
     font: 12px monospace;
@@ -135,6 +158,7 @@
 <div id="top-bar">
   <span id="status">Disconnected</span>
   <button id="cluster-btn" class="hidden">📊 集群</button>
+  <button id="file-btn" class="hidden">📁 上传</button>
 </div>
 
 <!-- 连接表单 -->
@@ -183,6 +207,15 @@
     </div>
   </div>
 </div>
+
+<!-- 文件信息提示 -->
+<div id="file-info">
+  <div id="file-info-text"></div>
+  <div class="progress"><div class="progress-bar" id="file-progress-bar"></div></div>
+</div>
+
+<!-- 隐藏的文件选择器 -->
+<input type="file" id="file-input" style="display:none" />
 
 <!-- 清除存储按钮 -->
 <button id="clear-btn">清除</button>
@@ -327,6 +360,8 @@ function connect() {
 
 // 处理 relay 文本回复
 function handleRelayText(text) {
+  // 文件传输数据（下载方向）拦截，不写终端
+  if (handleFileData(text)) return;
   // 后端列表更新（静默，不写终端）
   if (text.startsWith('[Info] Connected backends:')) {
     const firstLine = text.split('\n')[0];  // 只取第一行，忽略 [Info] Current:
@@ -345,6 +380,7 @@ function handleRelayText(text) {
 
 function initTerminal() {
   document.getElementById('terminal').classList.remove('hidden');
+  document.getElementById('file-btn').classList.remove('hidden');
 
   term = new Terminal({
     cursorBlink: true,
@@ -436,6 +472,131 @@ function initTerminal() {
     });
   }
 }
+
+// ── 文件传输 ──
+let _downloadState = null; // {b64path, path, size, chunks:[], received, idx}
+
+function showFileInfo(text, pct) {
+  const el = document.getElementById('file-info');
+  document.getElementById('file-info-text').textContent = text;
+  document.getElementById('file-progress-bar').style.width = Math.min(pct, 100) + '%';
+  el.style.display = 'block';
+  if (pct >= 100) {
+    setTimeout(() => { el.style.display = 'none'; }, 3000);
+  }
+}
+
+function handleFileData(text) {
+  // __FILE_BEGIN:{b64path}:{size} — 下载开始
+  if (text.startsWith('__FILE_BEGIN:')) {
+    const parts = text.split(':');
+    const b64path = parts[1];
+    const size = parseInt(parts[2], 10);
+    let path = '';
+    try { path = atob(b64path); } catch(e) { path = b64path; }
+    _downloadState = { b64path, path, size, chunks: [], received: 0, idx: 0 };
+    showFileInfo(`📥 下载: ${path} (${size} bytes)`, 0);
+    return true;
+  }
+  // __FILE_CHUNK:{b64path}:{idx}:{b64data} — 数据块
+  if (text.startsWith('__FILE_CHUNK:')) {
+    if (!_downloadState) return true; // 没有对应下载，静默忽略
+    const parts = text.split(':');
+    const idx = parseInt(parts[2], 10);
+    try {
+      const data = Uint8Array.from(atob(parts[3]), c => c.charCodeAt(0));
+      _downloadState.chunks[idx] = data;
+      _downloadState.received += data.length;
+      const pct = Math.round(_downloadState.received / _downloadState.size * 100);
+      showFileInfo(`📥 下载: ${_downloadState.path} (${_downloadState.received}/${_downloadState.size})`, pct);
+    } catch(e) { /* ignore parse errors */ }
+    return true;
+  }
+  // __FILE_END:{b64path}:{size} — 下载完成
+  if (text.startsWith('__FILE_END:')) {
+    if (!_downloadState) return true;
+    // 组装所有块
+    const totalLen = _downloadState.chunks.reduce((s, c) => s + (c ? c.length : 0), 0);
+    const result = new Uint8Array(totalLen);
+    let offset = 0;
+    for (const chunk of _downloadState.chunks) {
+      if (chunk) { result.set(chunk, offset); offset += chunk.length; }
+    }
+    // 触发浏览器下载
+    const blob = new Blob([result]);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = _downloadState.path.split('/').pop() || 'download';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showFileInfo(`✅ 下载完成: ${_downloadState.path} (${totalLen} bytes)`, 100);
+    _downloadState = null;
+    return true;
+  }
+  // __FILE_ERROR:{b64path}:{msg} — 下载失败
+  if (text.startsWith('__FILE_ERROR:')) {
+    const parts = text.split(':');
+    const msg = parts.slice(2).join(':');
+    showFileInfo(`❌ 下载失败: ${msg}`, 0);
+    _downloadState = null;
+    return true;
+  }
+  return false;
+}
+
+// ── 文件上传 ──
+document.getElementById('file-btn').addEventListener('click', function() {
+  document.getElementById('file-input').click();
+});
+
+document.getElementById('file-input').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  const path = '/tmp/' + file.name;  // 暂存到 /tmp/
+  const b64path = btoa(path);
+  const size = file.size;
+  const chunkSize = 65536;
+
+  showFileInfo(`📤 上传: ${file.name} → ${path} (${size} bytes)`, 0);
+
+  // 发送开始
+  ws.send(`__FILE_BEGIN:${b64path}:${size}`);
+
+  // 分块读取并发送
+  const reader = new FileReader();
+  let offset = 0;
+  let idx = 0;
+  let sent = 0;
+
+  function readNext() {
+    const slice = file.slice(offset, offset + chunkSize);
+    if (slice.size === 0) {
+      // 发送结束
+      ws.send(`__FILE_END:${b64path}`);
+      showFileInfo(`✅ 上传完成: ${file.name} (${sent} bytes)`, 100);
+      return;
+    }
+    reader.onload = function(ev) {
+      const data = new Uint8Array(ev.target.result);
+      const b64data = btoa(String.fromCharCode.apply(null, data));
+      ws.send(`__FILE_CHUNK:${b64path}:${idx}:${b64data}`);
+      idx++;
+      sent += data.length;
+      offset += data.length;
+      const pct = Math.round(sent / size * 100);
+      showFileInfo(`📤 上传: ${file.name} → ${path} (${sent}/${size})`, pct);
+      setTimeout(readNext, 10);  // 避免阻塞 UI
+    };
+    reader.readAsArrayBuffer(slice);
+  }
+
+  readNext();
+  this.value = '';  // 重置，允许再次选择同一文件
+});
 
 // ── 集群面板 ──
 let _listTimer = null;

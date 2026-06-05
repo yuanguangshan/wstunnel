@@ -10,6 +10,7 @@ wsstunnel/client.py — WebSocket 后端客户端（容器端）
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import os
 import pty
@@ -32,6 +33,10 @@ logger = logging.getLogger(__name__)
 _RECONNECT_MAX_DELAY = 300  # 最大重连间隔 5 分钟
 _HEARTBEAT_INTERVAL = 30    # 心跳间隔秒数
 _PIPE_READ_BUF = 4096       # 管道模式读取缓冲区大小
+_FILE_CHUNK_SIZE = 65536    # 文件传输每块大小（64KB）
+
+# 正在进行的文件传输状态：path -> {file, total, received}
+_file_transfers: dict[str, dict] = {}
 
 
 # ──────────────────────────────────────────────
@@ -117,6 +122,139 @@ def _heartbeat(ws: websocket.WebSocket, reconnect_event: threading.Event) -> Non
             logger.warning("Heartbeat failed, triggering reconnection")
             reconnect_event.set()
             break
+
+
+# ──────────────────────────────────────────────
+#  文件传输
+# ──────────────────────────────────────────────
+
+def _b64(s: str) -> str:
+    """Base64 编码字符串（用于路径）。"""
+    return base64.b64encode(s.encode()).decode()
+
+
+def _unb64(s: str) -> str:
+    """Base64 解码为字符串。"""
+    return base64.b64decode(s).decode()
+
+
+def _handle_file_cmd(msg: str, ws: websocket.WebSocket) -> bool:
+    """处理文件传输命令。返回 True 表示 msg 已被文件模块消费。"""
+    global _file_transfers
+
+    # ── 上传：前端通知开始上传 ──
+    if msg.startswith("__FILE_BEGIN:"):
+        parts = msg.split(":", 2)
+        if len(parts) < 3:
+            return True
+        try:
+            path = _unb64(parts[1])
+            total = int(parts[2])
+            os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+            f = open(path, "wb")
+            _file_transfers[path] = {"file": f, "total": total, "received": 0}
+            # 确认收到
+            ws.send(f"__FILE_BEGIN:{parts[1]}:{total}")
+            logger.info(f"File upload started: {path} ({total} bytes)")
+        except (OSError, ValueError) as e:
+            ws.send(f"__FILE_ERROR:{parts[1]}:{e}")
+        return True
+
+    # ── 上传：数据块 ──
+    if msg.startswith("__FILE_CHUNK:"):
+        parts = msg.split(":", 3)
+        if len(parts) < 4:
+            return True
+        try:
+            path = _unb64(parts[1])
+            data = base64.b64decode(parts[3])
+        except Exception:
+            return True
+        state = _file_transfers.get(path)
+        if state:
+            state["file"].write(data)
+            state["file"].flush()
+            state["received"] += len(data)
+        return True
+
+    # ── 上传：结束 ──
+    if msg.startswith("__FILE_END:"):
+        parts = msg.split(":", 2)
+        if len(parts) < 2:
+            return True
+        try:
+            path = _unb64(parts[1])
+        except Exception:
+            return True
+        state = _file_transfers.pop(path, None)
+        if state:
+            state["file"].close()
+            actual = state["received"]
+            logger.info(f"File upload completed: {path} ({actual} bytes)")
+            ws.send(f"__FILE_END:{parts[1]}:{actual}")
+        return True
+
+    # ── 上传：取消 ──
+    if msg.startswith("__FILE_CANCEL:"):
+        try:
+            path = _unb64(msg.split(":", 1)[1])
+        except Exception:
+            return True
+        state = _file_transfers.pop(path, None)
+        if state:
+            state["file"].close()
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            logger.info(f"File upload cancelled: {path}")
+            ws.send(f"__FILE_END:{_b64(path)}:0")
+        return True
+
+    # ── 下载：前端请求 ──
+    if msg.startswith("__FILE_DOWNLOAD:"):
+        try:
+            path = _unb64(msg.split(":", 1)[1])
+        except Exception:
+            return True
+        _send_file(path, ws)
+        return True
+
+    # ── Shell 友好命令：dl <path>（从交互式 Shell 下载文件）──
+    if msg.startswith("dl ") and not msg.startswith("__"):
+        path = msg[3:].strip()
+        if path:
+            logger.info(f"Shell download request: {path}")
+            ws.send(f"[Info] Downloading {path}...")
+            _send_file(path, ws)
+            return True
+
+    return False
+
+
+def _send_file(path: str, ws: websocket.WebSocket) -> None:
+    """读取本地文件并通过 WebSocket 分块发送。"""
+    b64_path = _b64(path)
+    try:
+        total = os.path.getsize(path)
+        ws.send(f"__FILE_BEGIN:{b64_path}:{total}")
+        idx = 0
+        with open(path, "rb") as f:
+            while True:
+                data = f.read(_FILE_CHUNK_SIZE)
+                if not data:
+                    break
+                b64_data = base64.b64encode(data).decode()
+                ws.send(f"__FILE_CHUNK:{b64_path}:{idx}:{b64_data}")
+                idx += 1
+        ws.send(f"__FILE_END:{b64_path}:{total}")
+        logger.info(f"File download sent: {path} ({total} bytes, {idx} chunks)")
+    except FileNotFoundError:
+        ws.send(f"__FILE_ERROR:{b64_path}:File not found")
+    except PermissionError:
+        ws.send(f"__FILE_ERROR:{b64_path}:Permission denied")
+    except Exception as e:
+        ws.send(f"__FILE_ERROR:{b64_path}:{e}")
 
 
 # ──────────────────────────────────────────────
@@ -299,6 +437,8 @@ def _run_pty_mode(
                 elif isinstance(msg, str):
                     if msg == "__PONG__":
                         continue
+                    if _handle_file_cmd(msg, ws):
+                        continue
                     if msg.startswith("__RESIZE:"):
                         try:
                             _, dims = msg.split(":", 1)
@@ -401,6 +541,9 @@ def _run_pipe_mode(
                 break
             # ── 心跳回包，直接忽略 ──
             if cmd == "__PONG__":
+                continue
+            # ── 文件传输命令 ──
+            if _handle_file_cmd(cmd, ws):
                 continue
             # ── 正常命令，转发给 shell ──
             logger.debug(f"Command: {cmd.strip()[:60]}")

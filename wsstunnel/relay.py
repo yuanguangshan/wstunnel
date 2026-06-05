@@ -227,6 +227,24 @@ async def _forward_to_frontends(
     frontends -= dead
 
 
+async def _forward_to_frontends_untagged(
+    frontends: set[Any],
+    message: str,
+) -> None:
+    """转发文本消息给所有前端，**不加** ``[@tag]`` 前缀。
+
+    用于文件传输数据块等场景，避免标签乱掉协议格式。
+    自动清理已断开的前端连接。
+    """
+    dead: set[Any] = set()
+    for f in frontends:
+        try:
+            await f.send(message)
+        except Exception:
+            dead.add(f)
+    frontends -= dead
+
+
 async def _forward_binary_to_frontends(
     frontends: set[Any],
     data: bytes,
@@ -657,6 +675,12 @@ class RelayState:
                                 self.frontends, message,
                                 self.frontend_text_modes,
                                 actual_name if len(self.backends) > 1 else None,
+                            )
+                            continue
+                        # ── 文本帧：文件传输协议消息不加标签 ──
+                        if isinstance(message, str) and message.startswith("__FILE_"):
+                            await _forward_to_frontends_untagged(
+                                self.frontends, message,
                             )
                             continue
                         # ── 文本帧：转发给所有前端，多后端时加标签 ──

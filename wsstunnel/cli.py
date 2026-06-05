@@ -42,6 +42,213 @@ def cli() -> None:
     """WebSocket Tunnel - 远程 Shell 中继工具"""
 
 
+# ──────────────────────────────────────────────
+#  文件传输（前端侧：上传/下载）
+# ──────────────────────────────────────────────
+
+
+def _b64(s: str) -> str:
+    """Base64 编码字符串。"""
+    import base64
+    return base64.b64encode(s.encode()).decode()
+
+
+def _connect_frontend(server: str, token: str | None, insecure: bool) -> "websocket.WebSocket":
+    """连接中继并认证为前端，返回 WebSocket 连接。"""
+    import ssl as ssl_mod
+    import websocket
+    ws = websocket.WebSocket(
+        sslopt={"cert_reqs": ssl_mod.CERT_NONE} if insecure else None,
+    )
+    ws.settimeout(120)
+    ws.connect(server)
+    # URL token 认证（?token=xxx）由 relay 自动处理
+    # 如果 relay 要求 AUTH 消息才认证
+    # 先收 AUTH_OK / AUTH_FAIL
+    try:
+        resp = ws.recv()
+        if resp == "AUTH_OK":
+            return ws
+    except Exception:
+        pass
+    # 尝试主动认证
+    if token:
+        ws.send(f"AUTH:{token}")
+        resp = ws.recv()
+        if resp != "AUTH_OK":
+            ws.close()
+            raise RuntimeError(f"Authentication failed: {resp}")
+    return ws
+
+
+@cli.command()
+@click.option("--server", required=True, help="中继服务器地址，如 ws://1.2.3.4:8080")
+@click.option("--token", "-t", default=None, help="认证令牌")
+@click.option("--insecure", is_flag=True, default=False, help="跳过 TLS 证书验证")
+@click.option("--backend", default=None, help="目标后端名称，默认当前选中的后端")
+@click.argument("local_path", type=click.Path(exists=True, readable=True))
+@click.argument("remote_path", required=False, default=None)
+def put(
+    server: str,
+    token: str | None,
+    insecure: bool,
+    backend: str | None,
+    local_path: str,
+    remote_path: str | None,
+) -> None:
+    """上传文件到远端后端。
+
+    LOCAL_PATH 是本地文件路径。
+    REMOTE_PATH 是远端保存路径（不设则使用本地文件名）。
+    """
+    import os
+    import base64
+    import websocket
+    import time
+
+    if not remote_path:
+        remote_path = os.path.basename(local_path)
+
+    file_size = os.path.getsize(local_path)
+    b64_remote = _b64(remote_path)
+
+    click.echo(f"Connecting to {server}...")
+    ws = _connect_frontend(server, token, insecure)
+
+    # USE 指定后端
+    if backend:
+        ws.send(f"USE {backend}")
+        click.echo(f"Switched to backend: {backend}")
+        time.sleep(0.3)
+        # 清空确认消息
+        try:
+            while True:
+                ws.recv()
+        except Exception:
+            pass
+        ws.settimeout(120)
+
+    click.echo(f"Uploading {local_path} ({file_size} bytes) → {remote_path}...")
+
+    ws.send(f"__FILE_BEGIN:{b64_remote}:{file_size}")
+    # 等确认
+    resp = ws.recv()
+    if not resp.startswith("__FILE_BEGIN:"):
+        ws.close()
+        raise RuntimeError(f"Upload rejected: {resp}")
+
+    chunk_size = 65536
+    idx = 0
+    sent = 0
+    with open(local_path, "rb") as f:
+        while True:
+            data = f.read(chunk_size)
+            if not data:
+                break
+            b64_data = base64.b64encode(data).decode()
+            ws.send(f"__FILE_CHUNK:{b64_remote}:{idx}:{b64_data}")
+            idx += 1
+            sent += len(data)
+            click.echo(f"  Progress: {sent}/{file_size} bytes ({100*sent//file_size}%)", nl=False)
+            click.echo("\r", nl=False)
+
+    ws.send(f"__FILE_END:{b64_remote}")
+    resp = ws.recv()
+    ws.close()
+
+    if resp.startswith("__FILE_END:"):
+        click.echo(f"\n✅ Upload complete: {remote_path} ({sent} bytes)")
+    elif resp.startswith("__FILE_ERROR:"):
+        _, _, msg = resp.partition(":")
+        _, _, msg = msg.partition(":")
+        raise RuntimeError(f"Upload failed: {msg}")
+
+
+@cli.command()
+@click.option("--server", required=True, help="中继服务器地址，如 ws://1.2.3.4:8080")
+@click.option("--token", "-t", default=None, help="认证令牌")
+@click.option("--insecure", is_flag=True, default=False, help="跳过 TLS 证书验证")
+@click.option("--backend", default=None, help="目标后端名称，默认当前选中的后端")
+@click.argument("remote_path")
+@click.argument("local_path", type=click.Path(), required=False, default=None)
+def get(
+    server: str,
+    token: str | None,
+    insecure: bool,
+    backend: str | None,
+    remote_path: str,
+    local_path: str | None,
+) -> None:
+    """从远端后端下载文件。
+
+    REMOTE_PATH 是远端文件路径。
+    LOCAL_PATH 是本地保存路径（不设则使用远端文件名）。
+    """
+    import os
+    import base64
+    import websocket
+
+    if not local_path:
+        local_path = os.path.basename(remote_path)
+
+    b64_remote = _b64(remote_path)
+
+    click.echo(f"Connecting to {server}...")
+    ws = _connect_frontend(server, token, insecure)
+
+    if backend:
+        ws.send(f"USE {backend}")
+        import time
+        time.sleep(0.3)
+        try:
+            while True:
+                ws.recv()
+        except Exception:
+            pass
+        ws.settimeout(120)
+
+    click.echo(f"Downloading {remote_path} → {local_path}...")
+    ws.send(f"__FILE_DOWNLOAD:{b64_remote}")
+
+    chunks: dict[int, bytes] = {}
+    total_size = 0
+    received = 0
+
+    while True:
+        resp = ws.recv()
+        if resp.startswith("__FILE_BEGIN:"):
+            _, _, size_str = resp.partition(":")
+            _, size_str = size_str.rsplit(":", 1)
+            total_size = int(size_str)
+            click.echo(f"  Size: {total_size} bytes")
+        elif resp.startswith("__FILE_CHUNK:"):
+            parts = resp.split(":", 3)
+            idx = int(parts[2])
+            data = base64.b64decode(parts[3])
+            chunks[idx] = data
+            received += len(data)
+            click.echo(f"  Progress: {received}/{total_size} bytes")
+        elif resp.startswith("__FILE_END:"):
+            break
+        elif resp.startswith("__FILE_ERROR:"):
+            _, _, msg = resp.partition(":")
+            _, _, msg = msg.partition(":")
+            ws.close()
+            raise RuntimeError(f"Download failed: {msg}")
+        else:
+            click.echo(f"  (ignored: {resp[:60]})")
+
+    ws.close()
+
+    # 按序写入
+    os.makedirs(os.path.dirname(os.path.abspath(local_path)) or ".", exist_ok=True)
+    with open(local_path, "wb") as f:
+        for idx in sorted(chunks):
+            f.write(chunks[idx])
+
+    click.echo(f"✅ Download complete: {local_path} ({received} bytes)")
+
+
 @cli.command()
 @click.option("--host", default="0.0.0.0", help="监听地址")
 @click.option("--port", default=8080, type=int, help="监听端口")
