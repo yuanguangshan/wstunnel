@@ -62,22 +62,28 @@ def _connect_frontend(server: str, token: str | None, insecure: bool) -> "websoc
     )
     ws.settimeout(120)
     ws.connect(server)
-    # URL token 认证（?token=xxx）由 relay 自动处理
-    # 如果 relay 要求 AUTH 消息才认证
-    # 先收 AUTH_OK / AUTH_FAIL
-    try:
-        resp = ws.recv()
-        if resp == "AUTH_OK":
-            return ws
-    except Exception:
-        pass
-    # 尝试主动认证
+
+    # 情况 1：URL 已带 ?token=xxx → relay 会自动认证并发送 AUTH_OK
+    if "?token=" in server.lower():
+        try:
+            resp = ws.recv()
+            if resp == "AUTH_OK":
+                return ws
+        except Exception:
+            pass
+        ws.close()
+        raise RuntimeError("URL token authentication failed (relay may be too old)")
+
+    # 情况 2：普通认证 → CLI 先主动发送 AUTH: 消息
     if token:
         ws.send(f"AUTH:{token}")
         resp = ws.recv()
         if resp != "AUTH_OK":
             ws.close()
             raise RuntimeError(f"Authentication failed: {resp}")
+        return ws
+
+    # 情况 3：无 token，纯明文连接
     return ws
 
 
