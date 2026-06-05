@@ -28,6 +28,64 @@ wsstunnel 采用了一条完全不同的技术路线：
 
 适用场景：受限容器环境（在线 IDE、CI runner）、仅允许 HTTP 出站的内网设备、IoT 边缘设备、安全测试。
 
+## 文件传输（v0.18.0 新增）
+
+wsstunnel 现支持在前后端之间直接传输文件，无需第三方工具。
+
+### CLI 命令（本机 ↔ 远端）
+
+```bash
+# 上传文件到远端后端
+wsstunnel put \
+    --server wss://your-vps:443 \
+    --token mysecret \
+    --backend mybox \
+    ./本地文件.txt \
+    /root/远程文件.txt
+
+# 从远端后端下载文件
+wsstunnel get \
+    --server wss://your-vps:443 \
+    --token mysecret \
+    --backend mybox \
+    /root/远程文件.txt \
+    ./下载到本地.txt
+```
+
+### 交互式 Shell 下载
+
+在 Web 终端或 websocat 的 shell 界面直接输入 `dl <path>` 即可将远端文件下载到本地：
+
+```bash
+# 在远端 Shell 界面输入
+dl /var/log/syslog
+# → 浏览器自动弹出下载，或 websocat 输出 __FILE_CHUNK: 数据
+```
+
+### Web 终端上传
+
+在浏览器中打开 Web 终端页面后，顶部工具栏有 **📁 上传** 按钮：
+
+1. 点击 **📁 上传**
+2. 选择本地文件
+3. 自动分块发送，右下角显示进度条
+4. 文件保存到后端 `/tmp/<原名>`
+
+### 协议
+
+所有文件传输基于 WebSocket 文本帧，使用 base64 编码：
+
+| 方向 | 消息格式 | 说明 |
+|------|---------|------|
+| 前端→后端 | `__FILE_BEGIN:{b64path}:{size}` | 开始上传/确认 |
+| 前端→后端 | `__FILE_CHUNK:{b64path}:{idx}:{b64data}` | 数据块（64KB） |
+| 前端→后端 | `__FILE_END:{b64path}` | 传输完成 |
+| 前端→后端 | `__FILE_CANCEL:{b64path}` | 取消上传 |
+| 前端→后端 | `__FILE_DOWNLOAD:{b64path}` | 请求下载 |
+| 后端→前端 | `__FILE_ERROR:{b64path}:{reason}` | 错误 |
+
+> 路径通过 base64 编码，避免特殊字符冲突。CLI 命令和 Web 终端自动处理编码，用户无需手动操作。
+
 ## 架构
 
 ```
@@ -701,6 +759,7 @@ FileNotFoundError: /bin/bash
 | v0.9.0 | 包名统一为 `wsstunnel`，源目录 `ws_tunnel/` → `wsstunnel/` | `from wsstunnel import ...` |
 | v0.9.1 | 显式包发现配置，修复新版 setuptools 打包 | — |
 | v0.9.2 | 新增 `wsstunnel --version`，添加 `[dev]` 可选依赖（pytest） | `pip install wsstunnel[dev]` 安装测试依赖 |
+| v0.18.0 | **文件传输**：`put`/`get` CLI 命令、`dl <path>` Shell 下载、Web 终端上传按钮、__FILE_* 协议 | 向后兼容，旧客户端不受影响。后端需升级至 v0.18.0 才能使用文件传输 |
 
 ## 开发与测试
 
