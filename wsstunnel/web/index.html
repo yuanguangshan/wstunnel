@@ -54,7 +54,7 @@
   #clear-btn:hover { opacity: 1; color: #fff; }
 
   /* ── 文件传输 ── */
-  #upload-path {\n    font: 12px monospace;\n    background: #16213e; color: #ccc;\n    border: 1px solid #333; border-radius: 4px;\n    padding: 3px 6px; width: 160px;\n  }\n  #upload-path:focus { border-color: #0f3460; outline: none; }\n  #file-btn {
+  #file-btn {
     font: 12px monospace;
     background: #0f3460; color: #aaa;
     border: 1px solid #0f3460; border-radius: 4px;
@@ -158,7 +158,6 @@
 <div id="top-bar">
   <span id="status">Disconnected</span>
   <button id="cluster-btn" class="hidden">📊 集群</button>
-  <input id="upload-path" class="hidden" placeholder="./文件名" value="" />
   <button id="file-btn" class="hidden">📁 上传</button>
 </div>
 
@@ -229,9 +228,32 @@ let term = null;
 let backends = [];
 let _mobileDup = '';
 let _mobileDupTimer = null;
+let _mobileBuf = '';
 
 function mobileSend(text) {
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  // 移动端也在缓冲中检测 dl 命令
+  _mobileBuf += text;
+  if (text === '\r' || text === '\n') {
+    const line = _mobileBuf.replace('\r', '').replace('\n', '').trim();
+    _mobileBuf = '';
+    if (line.startsWith('dl ')) {
+      const path = line.substring(3).trim();
+      if (path) {
+        ws.send(`dl ${path}`);
+        if (term) term.write(`\r\n[Info] Downloading ${path}...\r\n`);
+        // 设置 _mobileDup 让 onData 跳过这个换行
+        _mobileDup = text;
+        clearTimeout(_mobileDupTimer);
+        _mobileDupTimer = setTimeout(() => { _mobileDup = ''; }, 300);
+        return;
+      }
+    }
+    if (line.startsWith('cd ') || line === 'cd') {
+      const dir = line === 'cd' ? '~' : line.substring(3).trim();
+      ws.send(`__CWD:${dir}`);
+    }
+  }
   _mobileDup = text;
   clearTimeout(_mobileDupTimer);
   _mobileDupTimer = setTimeout(() => { _mobileDup = ''; }, 300);
@@ -382,9 +404,6 @@ function handleRelayText(text) {
 function initTerminal() {
   document.getElementById('terminal').classList.remove('hidden');
   document.getElementById('file-btn').classList.remove('hidden');
-  document.getElementById('upload-path').classList.remove('hidden');
-  // 默认上传到当前目录（后端自动拼 shell CWD）
-  document.getElementById('upload-path').value = './';
 
   term = new Terminal({
     cursorBlink: true,
@@ -618,10 +637,8 @@ document.getElementById('file-input').addEventListener('change', function(e) {
   const file = e.target.files[0];
   if (!file || !ws || ws.readyState !== WebSocket.OPEN) return;
 
-  let basePath = document.getElementById('upload-path').value.trim();
-  if (!basePath) basePath = './';
-  // 如果 basePath 是目录（以 / 结尾），追加文件名
-  const path = basePath.endsWith('/') ? basePath + file.name : basePath;
+  // 上传到后端当前目录
+  const path = file.name;
   const b64path = b64encode(path);
   const size = file.size;
   const chunkSize = 65536;
