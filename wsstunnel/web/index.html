@@ -476,6 +476,28 @@ function initTerminal() {
 // ── 文件传输 ──
 let _downloadState = null; // {b64path, path, size, chunks:[], received, idx}
 
+// UTF-8 安全的 base64 编解码（btoa/atob 不支持中文）
+function b64encode(str) {
+  const bytes = new TextEncoder().encode(str);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+function b64decode(str) {
+  try {
+    const binary = atob(str);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) {
+      bytes[i] = binary.charCodeAt(i);
+    }
+    return new TextDecoder().decode(bytes);
+  } catch(e) {
+    return str;
+  }
+}
+
 function showFileInfo(text, pct) {
   const el = document.getElementById('file-info');
   document.getElementById('file-info-text').textContent = text;
@@ -495,7 +517,7 @@ function handleFileData(text) {
   if (text.startsWith('__FILE_DONE:')) {
     const parts = text.split(':');
     let path = '';
-    try { path = atob(parts[1]); } catch(e) { path = parts[1]; }
+    try { path = b64decode(parts[1]); } catch(e) { path = parts[1]; }
     showFileInfo(`✅ 上传完成: ${path} (${parts[2]} bytes)`, 100);
     return true;
   }
@@ -505,7 +527,7 @@ function handleFileData(text) {
     const b64path = parts[1];
     const size = parseInt(parts[2], 10);
     let path = '';
-    try { path = atob(b64path); } catch(e) { path = b64path; }
+    try { path = b64decode(b64path); } catch(e) { path = b64path; }
     _downloadState = { b64path, path, size, chunks: [], received: 0, idx: 0 };
     showFileInfo(`📥 下载: ${path} (${size} bytes)`, 0);
     return true;
@@ -569,7 +591,7 @@ document.getElementById('file-input').addEventListener('change', function(e) {
   if (!file || !ws || ws.readyState !== WebSocket.OPEN) return;
 
   const path = '/tmp/' + file.name;  // 暂存到 /tmp/
-  const b64path = btoa(path);
+  const b64path = b64encode(path);
   const size = file.size;
   const chunkSize = 65536;
 
