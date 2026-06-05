@@ -76,30 +76,49 @@
     height: 100%; background: #2ecc71; border-radius: 2px; transition: width 0.3s;
   }
 
-  /* ── 移动端虚拟按键 ── */
+  /* ── 移动端浮窗控制键 ── */
   @media (pointer: coarse) {
-    #ctrl-bar { display: flex !important; }
+    #fab { display: flex !important; }
   }
-  #ctrl-bar {
+  #fab {
     display: none;
-    flex-direction: column; align-items: center; gap: 4px;
-    position: fixed; bottom: 0; left: 0; right: 0;
-    padding: 4px 4px 8px; z-index: 30;
-    background: rgba(26, 26, 46, 0.92);
-    border-top: 1px solid #333;
-  }
-  #ctrl-bar .row {
-    display: flex; justify-content: center; gap: 5px; width: 100%;
-  }
-  #ctrl-bar button {
-    font: 12px system-ui, sans-serif;
+    position: fixed; bottom: 20px; right: 20px;
+    width: 48px; height: 48px; border-radius: 50%;
     background: #0f3460; color: #ccc;
-    border: 1px solid #333; border-radius: 6px;
-    padding: 6px 14px; cursor: pointer; min-width: 44px;
+    border: 2px solid #1a4a8a;
+    align-items: center; justify-content: center;
+    font-size: 22px; cursor: pointer; z-index: 40;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    transition: transform 0.15s;
+    user-select: none; -webkit-user-select: none;
   }
-  #ctrl-bar button:active { background: #1a4a8a; color: #fff; }
-  #ctrl-bar button.active { background: #e74c3c; color: #fff; border-color: #e74c3c; }
-  #ctrl-bar .label { color: #888; font-size: 10px; padding: 6px 4px; }
+  #fab:active { transform: scale(0.92); }
+  #fab.active { background: #1a4a8a; }
+
+  #fab-panel {
+    display: none;
+    position: fixed; bottom: 76px; right: 20px;
+    background: rgba(26, 26, 46, 0.95);
+    border: 1px solid #333; border-radius: 12px;
+    padding: 10px; gap: 6px; z-index: 39;
+    flex-direction: column;
+    backdrop-filter: blur(8px);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+  }
+  #fab-panel.show { display: flex; }
+  #fab-panel .row {
+    display: flex; justify-content: center; gap: 3px;
+  }
+  #fab-panel button {
+    font: 13px system-ui, sans-serif;
+    background: #0f3460; color: #ccc;
+    border: 1px solid #333; border-radius: 8px;
+    padding: 7px 10px; cursor: pointer; min-width: 40px;
+    min-height: 42px; text-align: center;
+  }
+  #fab-panel button:active { background: #1a4a8a; color: #fff; }
+  #fab-panel button.active { background: #e74c3c; color: #fff; border-color: #e74c3c; }
+  #fab-panel .label { color: #888; font-size: 10px; padding: 6px 2px; }
 
   /* ── 集群面板 ── */
   #cluster-btn {
@@ -233,31 +252,39 @@
   </div>
 </div>
 
+<!-- 移动端浮窗控制键 -->
+<div id="fab">⌨</div>
+<div id="fab-panel">
+  <div class="row">
+    <button data-key="escape">Esc</button>
+    <button data-key="a">A↰</button>
+    <button data-key="e">E↱</button>
+    <button data-key="u">U</button>
+    <button data-key="k">K</button>
+    <button data-key="w">W</button>
+  </div>
+  <div class="row">
+    <button data-key="tab">Tab</button>
+    <button data-key="c">C</button>
+    <button data-key="d">D</button>
+    <button data-key="l">L</button>
+    <button data-key="r">R</button>
+    <button data-key="enter">↵</button>
+  </div>
+  <div class="row">
+    <button data-key="arrow-left">←</button>
+    <button data-key="arrow-right">→</button>
+    <button data-key="arrow-up">↑</button>
+    <button data-key="arrow-down">↓</button>
+    <button id="fab-copy-all" data-key="copy-all" title="复制全屏">📋</button>
+    <button id="fab-copy-out" data-key="copy-out" title="复制本行">📄</button>
+  </div>
+</div>
+
 <!-- 文件信息提示 -->
 <div id="file-info">
   <div id="file-info-text"></div>
   <div class="progress"><div class="progress-bar" id="file-progress-bar"></div></div>
-</div>
-
-<!-- 移动端虚拟控制键 -->
-<div id="ctrl-bar">
-  <div class="row">
-    <button id="ctrl-lock" class="ctrl-lock">🔒 Ctrl</button>
-    <span class="label">|</span>
-    <button data-key="c">C</button>
-    <button data-key="d">D</button>
-    <button data-key="z">Z</button>
-    <button data-key="l">L</button>
-    <span class="label">|</span>
-    <button data-key="escape">Esc</button>
-    <button data-key="tab">Tab</button>
-  </div>
-  <div class="row">
-    <button data-key="arrow-up">↑</button>
-    <button data-key="arrow-down">↓</button>
-    <button data-key="arrow-left">←</button>
-    <button data-key="arrow-right">→</button>
-  </div>
 </div>
 
 <!-- 隐藏的文件选择器 -->
@@ -278,14 +305,6 @@ let _mobileBuf = '';
 
 function mobileSend(text) {
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-  // Ctrl 锁定：下一个字母转 Ctrl+字母
-  if (_ctrlLock && text.length === 1 && /^[a-zA-Z]$/.test(text)) {
-    _ctrlLock = false;
-    document.getElementById('ctrl-lock').classList.remove('active');
-    document.getElementById('ctrl-lock').textContent = '🔒 Ctrl';
-    sendCtrlChar(text);
-    return;
-  }
   // 移动端也在缓冲中检测 dl 命令
   _mobileBuf += text;
   if (text === '\r' || text === '\n') {
@@ -534,15 +553,6 @@ function initTerminal() {
   term.onData((data) => {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
 
-    // Ctrl 锁定：下一个字母自动转 Ctrl+字母，用完解锁
-    if (_ctrlLock && data.length === 1 && /^[a-zA-Z]$/.test(data)) {
-      _ctrlLock = false;
-      document.getElementById('ctrl-lock').classList.remove('active');
-      document.getElementById('ctrl-lock').textContent = '🔒 Ctrl';
-      sendCtrlChar(data);
-      return;
-    }
-
     // 缓冲输入（放在 _mobileDup 检查之前，确保移动端也能积累）
     _inputBuf += data;
     if (data && data === _mobileDup) { _mobileDup = ''; return; }
@@ -750,38 +760,72 @@ document.getElementById('file-input').addEventListener('change', function(e) {
   this.value = '';  // 重置，允许再次选择同一文件
 });
 
-// ── Ctrl 自由组合锁定 ──
-let _ctrlLock = false;
-
-function sendCtrlChar(key) {
-  const code = key.toUpperCase().charCodeAt(0) - 64;
-  if (code >= 1 && code <= 26) {
-    const data = String.fromCharCode(code);
-    ws.send(new TextEncoder().encode(data));
-    term.write(`^${key.toUpperCase()}`);
+// ── 移动端浮窗控制键 ──
+function fabSend(key) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  let bytes;
+  if (key === 'escape') bytes = [0x1b];
+  else if (key === 'tab') bytes = [0x09];
+  else if (key === 'enter') bytes = [0x0d];
+  else if (key === 'arrow-up') bytes = [0x1b, 0x5b, 0x41];
+  else if (key === 'arrow-down') bytes = [0x1b, 0x5b, 0x42];
+  else if (key === 'arrow-left') bytes = [0x1b, 0x5b, 0x44];
+  else if (key === 'arrow-right') bytes = [0x1b, 0x5b, 0x43];
+  else {
+    const code = key.toUpperCase().charCodeAt(0) - 64;
+    if (code >= 1 && code <= 26) {
+      bytes = [code];
+      term.write(`^${key.toUpperCase()}`);
+    }
   }
+  if (bytes) ws.send(new Uint8Array(bytes));
 }
 
-document.getElementById('ctrl-lock').addEventListener('click', function() {
-  _ctrlLock = !_ctrlLock;
-  this.classList.toggle('active', _ctrlLock);
-  this.textContent = _ctrlLock ? '🔓 Ctrl' : '🔒 Ctrl';
+document.getElementById('fab').addEventListener('click', function() {
+  const panel = document.getElementById('fab-panel');
+  this.classList.toggle('active');
+  panel.classList.toggle('show');
 });
 
-document.getElementById('ctrl-bar').addEventListener('click', function(e) {
+document.getElementById('fab-panel').addEventListener('click', function(e) {
   const btn = e.target.closest('button');
-  if (!btn || !ws || ws.readyState !== WebSocket.OPEN) return;
-  if (btn.id === 'ctrl-lock') return;
+  if (!btn) return;
   const key = btn.dataset.key;
-  let data;
-  if (key === 'escape') { data = '\x1b'; }
-  else if (key === 'tab') { data = '\t'; }
-  else if (key === 'arrow-up') { data = '\x1b[A'; }
-  else if (key === 'arrow-down') { data = '\x1b[B'; }
-  else if (key === 'arrow-left') { data = '\x1b[D'; }
-  else if (key === 'arrow-right') { data = '\x1b[C'; }
-  else { sendCtrlChar(key); return; }
-  ws.send(new TextEncoder().encode(data));
+  if (key === 'copy-out' || key === 'copy-all') {
+    let text = '';
+    const buf = term.buffer.active;
+    if (key === 'copy-all') {
+      for (let i = 0; i < buf.length; i++) {
+        text += (buf.getLine(i)?.translateToString() || '') + '\n';
+      }
+    } else {
+      // 复制最后一行（当前编辑行）
+      text = buf.getLine(buf.length - 1)?.translateToString() || '';
+    }
+    if (navigator.clipboard && text) {
+      navigator.clipboard.writeText(text).then(() => {
+        term.write(`\r\n[Info] Copied ${text.split('\\n').length} line(s)\r\n`);
+      });
+    }
+    document.getElementById('fab').classList.remove('active');
+    document.getElementById('fab-panel').classList.remove('show');
+    return;
+  }
+  fabSend(key);
+  // 发送后自动收起面板
+  document.getElementById('fab').classList.remove('active');
+  document.getElementById('fab-panel').classList.remove('show');
+});
+
+// 点击面板外自动收起
+document.addEventListener('click', function(e) {
+  const panel = document.getElementById('fab-panel');
+  const fab = document.getElementById('fab');
+  if (!panel.classList.contains('show')) return;
+  if (!panel.contains(e.target) && !fab.contains(e.target)) {
+    fab.classList.remove('active');
+    panel.classList.remove('show');
+  }
 });
 
 // ── 集群面板 ──
