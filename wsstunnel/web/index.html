@@ -487,6 +487,18 @@ function showFileInfo(text, pct) {
 }
 
 function handleFileData(text) {
+  // __FILE_OK:{b64path}:{size} — 上传确认（忽略，不触发下载）
+  if (text.startsWith('__FILE_OK:')) {
+    return true;
+  }
+  // __FILE_DONE:{b64path}:{size} — 上传完成
+  if (text.startsWith('__FILE_DONE:')) {
+    const parts = text.split(':');
+    let path = '';
+    try { path = atob(parts[1]); } catch(e) { path = parts[1]; }
+    showFileInfo(`✅ 上传完成: ${path} (${parts[2]} bytes)`, 100);
+    return true;
+  }
   // __FILE_BEGIN:{b64path}:{size} — 下载开始
   if (text.startsWith('__FILE_BEGIN:')) {
     const parts = text.split(':');

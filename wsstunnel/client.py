@@ -153,8 +153,8 @@ def _handle_file_cmd(msg: str, ws: websocket.WebSocket) -> bool:
             os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
             f = open(path, "wb")
             _file_transfers[path] = {"file": f, "total": total, "received": 0}
-            # 确认收到
-            ws.send(f"__FILE_BEGIN:{parts[1]}:{total}")
+            # 确认收到（使用 __FILE_OK: 避免与下载的 __FILE_BEGIN: 混淆）
+            ws.send(f"__FILE_OK:{parts[1]}:{total}")
             logger.info(f"File upload started: {path} ({total} bytes)")
         except (OSError, ValueError) as e:
             ws.send(f"__FILE_ERROR:{parts[1]}:{e}")
@@ -191,7 +191,8 @@ def _handle_file_cmd(msg: str, ws: websocket.WebSocket) -> bool:
             state["file"].close()
             actual = state["received"]
             logger.info(f"File upload completed: {path} ({actual} bytes)")
-            ws.send(f"__FILE_END:{parts[1]}:{actual}")
+            # 使用 __FILE_DONE: 避免与下载的 __FILE_END: 混淆
+            ws.send(f"__FILE_DONE:{parts[1]}:{actual}")
         return True
 
     # ── 上传：取消 ──
@@ -208,7 +209,7 @@ def _handle_file_cmd(msg: str, ws: websocket.WebSocket) -> bool:
             except OSError:
                 pass
             logger.info(f"File upload cancelled: {path}")
-            ws.send(f"__FILE_END:{_b64(path)}:0")
+            ws.send(f"__FILE_DONE:{_b64(path)}:0")
         return True
 
     # ── 下载：前端请求 ──

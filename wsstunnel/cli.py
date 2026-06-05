@@ -131,9 +131,9 @@ def put(
     click.echo(f"Uploading {local_path} ({file_size} bytes) → {remote_path}...")
 
     ws.send(f"__FILE_BEGIN:{b64_remote}:{file_size}")
-    # 等确认
+    # 等确认（后端回复 __FILE_OK: 表示接受上传）
     resp = ws.recv()
-    if not resp.startswith("__FILE_BEGIN:"):
+    if not resp.startswith("__FILE_OK:"):
         ws.close()
         raise RuntimeError(f"Upload rejected: {resp}")
 
@@ -156,7 +156,7 @@ def put(
     resp = ws.recv()
     ws.close()
 
-    if resp.startswith("__FILE_END:"):
+    if resp.startswith("__FILE_DONE:"):
         click.echo(f"\n✅ Upload complete: {remote_path} ({sent} bytes)")
     elif resp.startswith("__FILE_ERROR:"):
         _, _, msg = resp.partition(":")

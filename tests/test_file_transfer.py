@@ -84,8 +84,8 @@ class TestHandleFileUpload:
             b64_path = _b64(path)
             result = _handle_file_cmd(f"__FILE_BEGIN:{b64_path}:100", ws)
             assert result is True
-            # 确认消息已发送
-            assert any(f"__FILE_BEGIN:{b64_path}:100" in str(m) for m in ws.sent)
+            # 确认消息已发送（后端回复 __FILE_OK:）
+            assert any(f"__FILE_OK:{b64_path}:100" in str(m) for m in ws.sent)
             # 文件应已创建（空文件）
             assert os.path.exists(path)
 
@@ -144,7 +144,8 @@ class TestHandleFileUpload:
             ws.sent.clear()
             result = _handle_file_cmd(f"__FILE_END:{b64_path}", ws)
             assert result is True
-            assert any(f"__FILE_END:{b64_path}:5" in str(m) for m in ws.sent)
+            # 后端回复 __FILE_DONE:（非 __FILE_END:，避免与下载混淆）
+            assert any(f"__FILE_DONE:{b64_path}:5" in str(m) for m in ws.sent)
 
     def test_upload_end_no_state(self):
         """没有对应上传状态的 __FILE_END 应静默忽略。"""
