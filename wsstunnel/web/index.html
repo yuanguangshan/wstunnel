@@ -616,7 +616,12 @@ document.getElementById('file-input').addEventListener('change', function(e) {
     }
     reader.onload = function(ev) {
       const data = new Uint8Array(ev.target.result);
-      const b64data = btoa(String.fromCharCode.apply(null, data));
+      // 手动遍历转 binary（避免 apply 传参超 65536 限制）
+      let binary = '';
+      for (let i = 0; i < data.length; i++) {
+        binary += String.fromCharCode(data[i]);
+      }
+      const b64data = btoa(binary);
       ws.send(`__FILE_CHUNK:${b64path}:${idx}:${b64data}`);
       idx++;
       sent += data.length;
