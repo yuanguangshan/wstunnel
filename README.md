@@ -1,5 +1,27 @@
 # wsstunnel
+
 wsstunnel 是一款通过 WebSocket 与 HTTP 代理穿透极端受限网络，提供原生 PTY 交互式远程 Shell 的轻量自托管工具。
+
+## 目录
+
+- [缘起](#缘起)
+- [为什么选择 wsstunnel？](#为什么选择-wsstunnel)
+- [快速开始](#快速开始5-分钟)
+- [文件传输](#文件传输v0180-新增)
+- [架构](#架构)
+- [安装](#安装)
+- [详细使用指南](#详细使用指南)
+- [多后端路由](#多后端路由)
+- [控制协议](#控制协议高级前端用)
+- [认证协议](#认证协议)
+- [TLS / WSS 加密](#tls--wss-加密)
+- [使用第三方客户端连接](#使用第三方客户端连接)
+- [使用库 API](#使用库-api在-python-代码中调用)
+- [常见工作流](#常见工作流)
+- [故障排查](#故障排查)
+- [已知限制](#已知限制)
+- [从旧版升级](#从旧版升级)
+- [开发与测试](#开发与测试)
 
 ## 缘起
 
@@ -27,68 +49,6 @@ wsstunnel 采用了一条完全不同的技术路线：
 **WebSocket 远程 Shell 中继工具** — 通过 WebSocket + HTTP 代理穿透受限网络环境，实现远程交互式 Shell。
 
 适用场景：受限容器环境（在线 IDE、CI runner）、仅允许 HTTP 出站的内网设备、IoT 边缘设备、安全测试。
-
-## 文件传输（v0.18.0 新增）
-
-wsstunnel 现支持在前后端之间直接传输文件，无需第三方工具。
-
-### CLI 命令（本机 ↔ 远端）
-
-```bash
-# 上传文件到远端后端
-wsstunnel put \
-    --server wss://your-vps:443 \
-    --token mysecret \
-    --backend mybox \
-    ./本地文件.txt \
-    /root/远程文件.txt
-
-# 从远端后端下载文件
-wsstunnel get \
-    --server wss://your-vps:443 \
-    --token mysecret \
-    --backend mybox \
-    /root/远程文件.txt \
-    ./下载到本地.txt
-```
-
-### 交互式 Shell 下载
-
-在 Web 终端或 websocat 的 shell 界面直接输入 `dl <path>` 即可将远端文件下载到本地：
-
-```bash
-# 在远端 Shell 界面输入
-dl /var/log/syslog
-# → 浏览器自动弹出下载，或 websocat 输出 __FILE_CHUNK: 数据
-```
-
-### Web 终端上传
-
-在浏览器中打开 Web 终端页面后，顶部工具栏有 **📁 上传** 按钮：
-
-1. 点击 **📁 上传**
-2. 选择本地文件
-3. 自动分块发送，右下角显示进度条
-4. 文件保存到后端当前 shell 目录
-
-### 协议
-
-所有文件传输基于 WebSocket 文本帧，使用 base64 编码：
-
-| 方向 | 消息格式 | 说明 |
-|------|---------|------|
-| 前端→后端 | `__FILE_BEGIN:{b64path}:{size}` | 开始上传 |
-| 前端→后端 | `__FILE_CHUNK:{b64path}:{idx}:{b64data}` | 数据块（64KB） |
-| 前端→后端 | `__FILE_END:{b64path}` | 上传完成 |
-| 前端→后端 | `__FILE_CANCEL:{b64path}` | 取消上传 |
-| 前端→后端 | `__FILE_DOWNLOAD:{b64path}` | 请求下载 |
-| 后端→前端 | `__FILE_OK:{b64path}:{size}` | 上传确认 |
-| 后端→前端 | `__FILE_DONE:{b64path}:{size}` | 上传完成确认 |
-| 后端→前端 | `__FILE_ERROR:{b64path}:{reason}` | 错误 |
-| 后端→前端 | `__FILE_BEGIN:{b64path}:{size}` | 下载开始 |
-| 后端→前端 | `__FILE_END:{b64path}:{size}` | 下载完成 |
-
-> 路径通过 base64 编码，避免特殊字符冲突。CLI 命令和 Web 终端自动处理编码，用户无需手动操作。
 
 ## 架构
 
@@ -167,6 +127,56 @@ print('Output:', ws.recv())
 ws.close()
 "
 ```
+
+## 文件传输（v0.18.0 新增）
+
+wsstunnel 支持在前后端之间直接传输文件，无需第三方工具。
+
+### CLI 命令（本机 ↔ 远端）
+
+```bash
+# 上传文件到远端后端
+wsstunnel put \
+    --server wss://your-vps:443 \
+    --token mysecret \
+    --backend mybox \
+    ./本地文件.txt \
+    /root/远程文件.txt
+
+# 从远端后端下载文件
+wsstunnel get \
+    --server wss://your-vps:443 \
+    --token mysecret \
+    --backend mybox \
+    /root/远程文件.txt \
+    ./下载到本地.txt
+```
+
+### 交互式 Shell 下载
+
+在 Web 终端中输入 `dl <path>` 即可下载。相对路径自动拼 shell 当前目录：
+
+```bash
+dl /var/log/syslog      # 绝对路径
+dl 文件名.txt             # 当前目录
+```
+
+### Web 终端上传
+
+顶部工具栏 **📁 上传** 按钮，选文件传到 shell 当前目录。
+
+### 协议
+
+| 方向 | 消息格式 | 说明 |
+|------|---------|------|
+| 前端→后端 | `__FILE_BEGIN:{b64path}:{size}` | 开始上传 |
+| 前端→后端 | `__FILE_CHUNK:{b64path}:{idx}:{b64data}` | 数据块（64KB） |
+| 前端→后端 | `__FILE_END:{b64path}` | 上传完成 |
+| 前端→后端 | `__FILE_DOWNLOAD:{b64path}` | 请求下载 |
+| 后端→前端 | `__FILE_OK:{b64path}:{size}` | 上传确认 |
+| 后端→前端 | `__FILE_DONE:{b64path}:{size}` | 上传完成 |
+| 后端→前端 | `__FILE_BEGIN/END:{b64path}:{size}` | 下载开始/结束 |
+| 后端→前端 | `__FILE_ERROR:{b64path}:{reason}` | 错误 |
 
 ## 安装
 
