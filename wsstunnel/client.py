@@ -455,6 +455,7 @@ def _run_pty_mode(
             stdout=slave_fd,
             stderr=slave_fd,
             close_fds=False,
+            pass_fds=(master_fd,),
             preexec_fn=os.setsid,
         )
         os.close(slave_fd)
