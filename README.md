@@ -69,7 +69,7 @@ dl /var/log/syslog
 1. 点击 **📁 上传**
 2. 选择本地文件
 3. 自动分块发送，右下角显示进度条
-4. 文件保存到后端 `/tmp/<原名>`
+4. 文件保存到后端当前 shell 目录
 
 ### 协议
 
@@ -77,12 +77,16 @@ dl /var/log/syslog
 
 | 方向 | 消息格式 | 说明 |
 |------|---------|------|
-| 前端→后端 | `__FILE_BEGIN:{b64path}:{size}` | 开始上传/确认 |
+| 前端→后端 | `__FILE_BEGIN:{b64path}:{size}` | 开始上传 |
 | 前端→后端 | `__FILE_CHUNK:{b64path}:{idx}:{b64data}` | 数据块（64KB） |
-| 前端→后端 | `__FILE_END:{b64path}` | 传输完成 |
+| 前端→后端 | `__FILE_END:{b64path}` | 上传完成 |
 | 前端→后端 | `__FILE_CANCEL:{b64path}` | 取消上传 |
 | 前端→后端 | `__FILE_DOWNLOAD:{b64path}` | 请求下载 |
+| 后端→前端 | `__FILE_OK:{b64path}:{size}` | 上传确认 |
+| 后端→前端 | `__FILE_DONE:{b64path}:{size}` | 上传完成确认 |
 | 后端→前端 | `__FILE_ERROR:{b64path}:{reason}` | 错误 |
+| 后端→前端 | `__FILE_BEGIN:{b64path}:{size}` | 下载开始 |
+| 后端→前端 | `__FILE_END:{b64path}:{size}` | 下载完成 |
 
 > 路径通过 base64 编码，避免特殊字符冲突。CLI 命令和 Web 终端自动处理编码，用户无需手动操作。
 
@@ -371,6 +375,9 @@ open "wsstunnel/web/index.html?server=wss://your-vps:443&token=mysecret"
 
 页面功能：
 - **原生终端体验**：颜色、光标、`vim`、`top`、`htop` 全部原生支持
+- **📁 文件上传**：顶部工具栏点按钮选文件，传到 shell 当前目录
+- **📥 文件下载**：shell 中输入 `dl <path>`，浏览器自动弹出下载
+- **⌨ 移动端控制面板**：右下角浮窗，支持 Ctrl+A/E/U/K/W、方向键、复制
 - **`\r` 正确处理**：xterm.js 是完整终端模拟器，不是文本显示
 - **窗口大小自适应**：`__RESIZE` 自动同步
 - **URL token 认证**：`?token=xxx` 自动连接，无需手动输入
@@ -760,6 +767,10 @@ FileNotFoundError: /bin/bash
 | v0.9.1 | 显式包发现配置，修复新版 setuptools 打包 | — |
 | v0.9.2 | 新增 `wsstunnel --version`，添加 `[dev]` 可选依赖（pytest） | `pip install wsstunnel[dev]` 安装测试依赖 |
 | v0.18.0 | **文件传输**：`put`/`get` CLI 命令、`dl <path>` Shell 下载、Web 终端上传按钮、__FILE_* 协议 | 向后兼容，旧客户端不受影响。后端需升级至 v0.18.0 才能使用文件传输 |
+| v0.18.5 | 上传到 shell 当前目录（追踪 `cd` 命令） | 不再写死 `/tmp/` |
+| v0.18.8 | PTY 按键缓冲检测 `dl`，后台线程发送不阻塞命令行 | 解决移动端 `dl` 失效 |
+| v0.18.14 | 移动端浮窗控制面板（⌨ 圆点展开 3 行布局） | 支持 Ctrl+A/E/U/K/W、方向键、复制全屏/本行 |
+| v0.18.15 | 面板打开时收起系统键盘，禁止页面自动缩放 | 移动端体验优化 |
 
 ## 开发与测试
 
