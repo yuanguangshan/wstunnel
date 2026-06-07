@@ -853,6 +853,7 @@ async def _run_async(
     port: int,
     handler: Any,
     ssl_context: ssl.SSLContext | None = None,
+    compression: bool = False,
 ) -> None:
     """异步运行中继服务。
 
@@ -861,6 +862,7 @@ async def _run_async(
         port: 监听端口。
         handler: WebSocket 连接处理函数。
         ssl_context: 可选 SSL 上下文，启用 ``wss://``。
+        compression: 是否启用 WebSocket permessage-deflate 压缩。
     """
     async with websockets.serve(
         handler, host, port,
@@ -868,6 +870,7 @@ async def _run_async(
         ping_interval=None,
         ping_timeout=None,
         process_request=_http_request_handler,
+        compression="deflate" if compression else None,
     ):
         scheme = "wss" if ssl_context else "ws"
         http_scheme = "https" if ssl_context else "http"
@@ -888,6 +891,7 @@ def run_relay(
     token_file: str | None = None,
     allow_ip: list[str] | None = None,
     deny_cmd: list[str] | None = None,
+    compression: bool = False,
 ) -> None:
     """启动 WebSocket 中继服务。
 
@@ -901,6 +905,7 @@ def run_relay(
         token_file: token JSON 文件路径（支持多 token + 角色 + 过期）。
         allow_ip: IP 白名单列表（支持 CIDR）。
         deny_cmd: 命令黑名单列表。
+        compression: 启用 WebSocket permessage-deflate 压缩。
     """
     if token:
         logger.info(f"Authentication enabled (token={token[:8]}...)")
@@ -943,4 +948,6 @@ def run_relay(
             f"brute-force={'on' if state.brute_force else 'off'}"
         )
 
-    asyncio.run(_run_async(host, port, state.handler, ssl_context))
+    if compression:
+        logger.info("WebSocket compression enabled (permessage-deflate)")
+    asyncio.run(_run_async(host, port, state.handler, ssl_context, compression))

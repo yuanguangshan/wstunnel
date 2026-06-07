@@ -328,6 +328,7 @@ def run_client(
     shell: str = "/bin/bash",
     name: str | None = None,
     no_pty: bool = False,
+    compression: bool = False,
 ) -> None:
     """启动 WebSocket 后端客户端。
 
@@ -343,6 +344,7 @@ def run_client(
         shell: shell 路径，默认 ``/bin/bash``。
         name: 容器名称，用于多容器场景。
         no_pty: 禁用 PTY，回退到管道模式（向后兼容）。
+        compression: 启用 WebSocket permessage-deflate 压缩。
     """
     proxy_host: str | None = None
     proxy_port: int | None = None
@@ -360,6 +362,7 @@ def run_client(
         try:
             ws = websocket.WebSocket(
                 sslopt={"cert_reqs": ssl.CERT_NONE} if insecure else None,
+                enable_compression=compression,
             )
             ws.settimeout(60)
             ws.connect(

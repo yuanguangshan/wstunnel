@@ -36,6 +36,7 @@ class TestCLI:
         assert "--wxpush" in result.output
         assert "--verbose" in result.output
         assert "--quiet" in result.output
+        assert "--compression" in result.output
 
     def test_relay_defaults(self):
         """验证 relay 子命令的默认参数。"""
@@ -55,6 +56,7 @@ class TestCLI:
         assert "--shell" in result.output
         assert "--name" in result.output
         assert "--no-pty" in result.output
+        assert "--compression" in result.output
 
     def test_client_requires_server(self):
         """client 子命令必须提供 --server 参数。"""

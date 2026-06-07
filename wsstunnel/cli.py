@@ -281,6 +281,10 @@ def get(
     "--deny-cmd", default=None, multiple=True,
     help="命令黑名单（如 --deny-cmd rm）",
 )
+@click.option(
+    "--compression", is_flag=True, default=False,
+    help="启用 WebSocket permessage-deflate 压缩",
+)
 @click.option("--verbose", is_flag=True, default=False, help="详细日志 (DEBUG)")
 @click.option("--quiet", is_flag=True, default=False, help="静默模式，仅显示警告和错误")
 def relay(
@@ -293,6 +297,7 @@ def relay(
     token_file: str | None,
     allow_ip: tuple[str, ...],
     deny_cmd: tuple[str, ...],
+    compression: bool,
     verbose: bool,
     quiet: bool,
 ) -> None:
@@ -303,6 +308,7 @@ def relay(
         token_file=token_file,
         allow_ip=list(allow_ip) if allow_ip else None,
         deny_cmd=list(deny_cmd) if deny_cmd else None,
+        compression=compression,
     )
 
 
@@ -331,6 +337,10 @@ def relay(
     "--no-pty", is_flag=True, default=False,
     help="禁用 PTY，回退到管道模式（不支持 vim/top 等 TUI 程序，向后兼容）",
 )
+@click.option(
+    "--compression", is_flag=True, default=False,
+    help="启用 WebSocket permessage-deflate 压缩",
+)
 @click.option("--verbose", is_flag=True, default=False, help="详细日志 (DEBUG)")
 @click.option("--quiet", is_flag=True, default=False, help="静默模式，仅显示警告和错误")
 @click.option(
@@ -354,6 +364,7 @@ def client(
     shell: str,
     name: str | None,
     no_pty: bool,
+    compression: bool,
     verbose: bool,
     quiet: bool,
     daemon: bool,
@@ -364,7 +375,10 @@ def client(
     if daemon:
         _daemonize(pidfile, logfile, verbose)
     _setup_logging(verbose, quiet)
-    run_client(server, proxy, reconnect, token, insecure, shell, name, no_pty)
+    run_client(
+        server, proxy, reconnect, token, insecure, shell, name, no_pty,
+        compression=compression,
+    )
 
 
 def _daemonize(pidfile: str, logfile: str, verbose: bool) -> None:
