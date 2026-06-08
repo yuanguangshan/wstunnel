@@ -44,6 +44,9 @@ _cwd: str = os.getcwd()
 # PTY 按键缓冲：用于检测 dl 等特殊命令（后端拦截，不受前端影响）
 _key_buffer: str = ""
 
+# 真实 CWD 追踪：通过 /proc/<pid>/cwd 精确获取，不受隐式 cd 影响
+_shell_pid: int | None = None
+
 
 def _update_cwd(cmd: str) -> None:
     """根据 shell 命令更新追踪的当前工作目录。"""
@@ -171,11 +174,33 @@ def _unb64(s: str) -> str:
 
 
 def _resolve_path(path: str) -> str:
-    """解析上传/下载路径：相对路径自动拼接 shell 当前目录。"""
+    """解析上传/下载路径：相对路径自动拼接 shell 当前目录。
+
+    优先通过 /proc/<pid>/cwd 获取真实路径（不受 cd 别名、pushd、
+    二进制工具、proot/chroot 等隐式 CWD 变更影响）。
+    回退到 __CWD: / PROMPT_COMMAND 追踪的 _cwd。
+    """
     if path.startswith("./") or path.startswith("~"):
-        return os.path.normpath(os.path.join(_cwd, path))
+        base = _cwd
+        # 尝试从 /proc 获取真实 CWD
+        try:
+            if _shell_pid is not None:
+                real_cwd = os.readlink(f"/proc/{_shell_pid}/cwd")
+                if real_cwd:
+                    base = real_cwd
+        except (FileNotFoundError, PermissionError, OSError):
+            pass
+        return os.path.normpath(os.path.join(base, path))
     if not os.path.isabs(path):
-        return os.path.normpath(os.path.join(_cwd, path))
+        base = _cwd
+        try:
+            if _shell_pid is not None:
+                real_cwd = os.readlink(f"/proc/{_shell_pid}/cwd")
+                if real_cwd:
+                    base = real_cwd
+        except (FileNotFoundError, PermissionError, OSError):
+            pass
+        return os.path.normpath(os.path.join(base, path))
     return path
 
 
@@ -462,6 +487,8 @@ def _run_pty_mode(
             preexec_fn=os.setsid,
         )
         os.close(slave_fd)
+        global _shell_pid
+        _shell_pid = shell_proc.pid
 
         shell_restart = threading.Event()
 
@@ -604,6 +631,8 @@ def _run_pipe_mode(
         stderr=subprocess.STDOUT,
         bufsize=0,
     )
+    global _shell_pid
+    _shell_pid = shell_proc.pid
 
     def read_and_forward() -> None:
         """读取 shell 输出，按行缓冲后通过 WebSocket 发送。"""
