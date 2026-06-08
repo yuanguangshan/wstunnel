@@ -354,6 +354,7 @@ def run_client(
     name: str | None = None,
     no_pty: bool = False,
     compression: bool = False,
+    max_retries: int = 0,
 ) -> None:
     """启动 WebSocket 后端客户端。
 
@@ -370,6 +371,7 @@ def run_client(
         name: 容器名称，用于多容器场景。
         no_pty: 禁用 PTY，回退到管道模式（向后兼容）。
         compression: 启用 WebSocket permessage-deflate 压缩。
+        max_retries: 最大重连次数，0 表示无限重连（默认）。
     """
     proxy_host: str | None = None
     proxy_port: int | None = None
@@ -383,6 +385,11 @@ def run_client(
 
     attempt = 0
     while True:
+        if max_retries > 0 and attempt >= max_retries:
+            logger.error(
+                f"Max retries ({max_retries}) reached, giving up"
+            )
+            break
         reconnect_event = threading.Event()
         try:
             ws = websocket.WebSocket(
@@ -443,7 +450,13 @@ def run_client(
             # reconnect_event.set() 后让 run_*mode 优雅退出（无异常）
             # 这里检测到 event 已 set 就走重连，而不是 break 退出进程
             if reconnect_event.is_set():
-                logger.info("Connection degraded, reconnecting...")
+                attempt += 1
+                if max_retries > 0 and attempt >= max_retries:
+                    logger.error(
+                        f"Max retries ({max_retries}) reached, giving up"
+                    )
+                    break
+                logger.info(f"Connection degraded, reconnecting (attempt {attempt})...")
                 continue
             break
 
@@ -466,7 +479,7 @@ def _run_pty_mode(
         shell: shell 可执行文件路径。
         reconnect_event: 重连事件。
     """
-    global _key_buffer
+    global _key_buffer, _shell_pid
     max_restarts = 5
     restart_count = 0
 
@@ -487,7 +500,6 @@ def _run_pty_mode(
             preexec_fn=os.setsid,
         )
         os.close(slave_fd)
-        global _shell_pid
         _shell_pid = shell_proc.pid
 
         shell_restart = threading.Event()
@@ -624,6 +636,7 @@ def _run_pipe_mode(
         shell: shell 可执行文件路径。
         reconnect_event: 重连事件。
     """
+    global _shell_pid
     shell_proc = subprocess.Popen(
         [shell, "-i"],
         stdin=subprocess.PIPE,
@@ -631,7 +644,6 @@ def _run_pipe_mode(
         stderr=subprocess.STDOUT,
         bufsize=0,
     )
-    global _shell_pid
     _shell_pid = shell_proc.pid
 
     def read_and_forward() -> None:

@@ -341,6 +341,10 @@ def relay(
     "--compression", is_flag=True, default=False,
     help="启用 WebSocket permessage-deflate 压缩",
 )
+@click.option(
+    "--max-retries", default=0, type=int,
+    help="最大重连次数（0=无限，默认0）",
+)
 @click.option("--verbose", is_flag=True, default=False, help="详细日志 (DEBUG)")
 @click.option("--quiet", is_flag=True, default=False, help="静默模式，仅显示警告和错误")
 @click.option(
@@ -365,6 +369,7 @@ def client(
     name: str | None,
     no_pty: bool,
     compression: bool,
+    max_retries: int,
     verbose: bool,
     quiet: bool,
     daemon: bool,
@@ -378,6 +383,7 @@ def client(
     run_client(
         server, proxy, reconnect, token, insecure, shell, name, no_pty,
         compression=compression,
+        max_retries=max_retries,
     )
 
 
