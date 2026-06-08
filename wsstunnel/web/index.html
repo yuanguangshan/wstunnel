@@ -893,6 +893,12 @@ function renderCluster() {
   ).join('');
   sel.innerHTML = names.map(n => `<option value="${n}">${n}</option>`).join('');
   document.getElementById('cluster-btn').classList.remove('hidden');
+
+  // 恢复上次保存的后端选择
+  const saved = localStorage.getItem('wsstunnel_backend');
+  if (saved && names.includes(saved) && saved !== currentName && ws && ws.readyState === WebSocket.OPEN) {
+    ws.send('USE ' + saved);
+  }
 }
 
 function stripBackendName(b) {
@@ -941,7 +947,10 @@ document.getElementById('cluster-all-input').addEventListener('keydown', (e) => 
 
 // 切换当前后端
 document.getElementById('cluster-current-select').addEventListener('change', function() {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send('USE ' + this.value);
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send('USE ' + this.value);
+    localStorage.setItem('wsstunnel_backend', this.value);
+  }
 });
 
 // 单独发送

@@ -768,17 +768,18 @@ class RelayState:
             logger.info(f"Security: rejected connection from {peer_ip} (rate limited)")
             await websocket.close(1008, "Too many attempts, try later")
             return
-        # ── 连接数限制 ──
-        if len(self.frontends) >= self._max_frontends:
-            logger.info(f"Security: rejected connection (max frontends reached)")
-            await websocket.close(1008, "Server full")
-            return
-        ip_count = self._max_per_ip.get(peer_ip, 0)
-        if ip_count >= self._max_connections_per_ip:
-            logger.info(f"Security: rejected connection from {peer_ip} (too many connections)")
-            await websocket.close(1008, "Too many connections from your IP")
-            return
-        self._max_per_ip[peer_ip] = ip_count + 1
+        # ── 连接数限制（127.0.0.1/::1 豁免）──
+        if peer_ip not in ("127.0.0.1", "::1"):
+            if len(self.frontends) >= self._max_frontends:
+                logger.info(f"Security: rejected connection (max frontends reached)")
+                await websocket.close(1008, "Server full")
+                return
+            ip_count = self._max_per_ip.get(peer_ip, 0)
+            if ip_count >= self._max_connections_per_ip:
+                logger.info(f"Security: rejected connection from {peer_ip} (too many connections)")
+                await websocket.close(1008, "Too many connections from your IP")
+                return
+            self._max_per_ip[peer_ip] = ip_count + 1
 
         # ── URL token 自动认证 ──
         url_token = self._extract_url_token(websocket)
