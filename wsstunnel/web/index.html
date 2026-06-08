@@ -416,6 +416,8 @@ function connect() {
 
   ws.onopen = () => {
     const _connectedAt = Date.now();
+    _reconnectAttempt = 0;
+    if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
     setStatus('已连接', true);
     clearInterval(window._uptimeTimer);
     window._uptimeTimer = setInterval(() => {
@@ -444,14 +446,35 @@ function connect() {
     }
   };
 
+  // ── 自动重连 ──
+  let _reconnectAttempt = 0;
+  let _reconnectTimer = null;
+
   ws.onclose = () => {
     clearInterval(window._uptimeTimer);
+    clearInterval(window._listTimer);
     setStatus('已断开');
+
     if (term) {
       term.dispose();
       term = null;
     }
-    document.getElementById('connect-form').classList.remove('hidden');
+
+    // 自动重连（指数退避，最大 30s）
+    _reconnectAttempt++;
+    const delay = Math.min(1000 * Math.pow(2, _reconnectAttempt - 1), 30000);
+    setStatus(`重连中 (${_reconnectAttempt}次, ${delay/1000}s)...`);
+    _reconnectTimer = setTimeout(() => {
+      const savedServer = localStorage.getItem(STORAGE_SERVER);
+      const savedToken = localStorage.getItem(STORAGE_TOKEN);
+      if (savedServer) {
+        document.getElementById('server-url').value = savedServer;
+        if (savedToken) document.getElementById('token-input').value = savedToken;
+        connect();
+      } else {
+        document.getElementById('connect-form').classList.remove('hidden');
+      }
+    }, delay);
   };
 
   ws.onerror = () => {
